@@ -1,0 +1,21 @@
+# Python & packaging
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+.uv_cache/
+.pytest_cache/
+.ruff_cache/
+
+# Raw API dumps & bulky XML archives (keep literature.db and extractions/*.md tracked for Streamlit Cloud)
+data/*/raw/
+data/*/fulltext_xml/
+*.db-shm
+*.db-wal
+
+# Local agent harness & IDE files
+.agent/
+.licenses/
+.vscode/
+.idea/
