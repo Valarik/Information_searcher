@@ -7,10 +7,10 @@
 
 ### Сбор и PRISMA-скрининг (HARV)
 
-- [ ] **HARV-01**: Универсальный сборщик (`src/harvester.py`), принимающий `configs/<nosology>.yaml` и выгружающий статьи за 2016–2026 гг. из PubMed, Europe PMC, OpenAlex и клинических исследований из ClinicalTrials.gov.
-- [ ] **HARV-02**: Дедупликация по DOI / PMID / PMCID / заголовку и сохранение единого реестра в `data/<nosology>/literature.db`.
-- [ ] **HARV-03**: Автоматическая стратификация статей по уровням доказательности (`Tier 1`: метаанализы/РКИ/гайдлайны; `Tier 2`: когорты/GWAS/scRNA-seq; `Tier 3`: серии/in vitro/обзоры; `Tier 4`: кейсы/письма) и разметка по 5 тематическим кластерам (`src/triage.py`).
-- [ ] **HARV-04**: Автоматическая выгрузка открытых полнотекстовых XML из Europe PMC для работ `Tier 1–2` и генерация PRISMA-отчета по корпусу (`reports/dupuytren/prisma_stats.md`).
+- [x] **HARV-01**: Универсальный сборщик (`src/harvester.py`), принимающий `configs/<nosology>.yaml` и выгружающий статьи за 2016–2026 гг. из PubMed, Europe PMC, OpenAlex и клинических исследований из ClinicalTrials.gov.
+- [x] **HARV-02**: Дедупликация по DOI / PMID / PMCID / заголовку и сохранение единого реестра в `data/<nosology>/literature.db`.
+- [x] **HARV-03**: Автоматическая стратификация статей по уровням доказательности (`Tier 1`: метаанализы/РКИ/гайдлайны; `Tier 2`: когорты/GWAS/scRNA-seq; `Tier 3`: серии/in vitro/обзоры; `Tier 4`: кейсы/письма) и разметка по 5 тематическим кластерам (`src/triage.py`).
+- [x] **HARV-04**: Автоматическая выгрузка открытых полнотекстовых XML из Europe PMC для работ `Tier 1–2` и генерация PRISMA-отчета по корпусу (`reports/dupuytren/prisma_stats.md`).
 
 ### Роевая структурированная экстракция (EXTR)
 
@@ -45,10 +45,10 @@
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| HARV-01 | Phase 1 | Pending |
-| HARV-02 | Phase 1 | Pending |
-| HARV-03 | Phase 1 | Pending |
-| HARV-04 | Phase 1 | Pending |
+| HARV-01 | Phase 1 | Complete |
+| HARV-02 | Phase 1 | Complete |
+| HARV-03 | Phase 1 | Complete |
+| HARV-04 | Phase 1 | Complete |
 | EXTR-01 | Phase 2 | Pending |
 | EXTR-02 | Phase 2 | Pending |
 | EXTR-03 | Phase 2 | Pending |
@@ -59,6 +59,7 @@
 | UI-01 | Phase 4 | Pending |
 
 **Coverage:**
+
 - v1 requirements: 12 total
 - Mapped to phases: 12
 - Unmapped: 0

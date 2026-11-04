@@ -1,19 +1,24 @@
 # /// script
-# requires-python = ">=3.10"
+# requires-python = ">=3.11,<3.14"
 # dependencies = [
 #   "pyyaml",
+#   "polite-http",
+#   "python-dotenv",
+#   "pip-system-certs",
+#   "truststore",
 # ]
 # ///
 """Universal literature harvester for nosologies (Phase 1, Plan 01-01).
 
 Harvests publications (2016-2026) from PubMed, Europe PMC, OpenAlex, and
-clinical trials from ClinicalTrials.gov using the official Science Skill CLI
-wrappers with rate limiting and local JSON caching.
+clinical trials from ClinicalTrials.gov using the official Science Skill
+modules and CLI wrappers with rate limiting and local JSON caching.
 """
 
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import os
 import re
@@ -23,6 +28,9 @@ import subprocess
 import sys
 from pathlib import Path
 from typing import Any
+
+import truststore
+truststore.inject_into_ssl()
 
 import yaml
 
@@ -34,6 +42,15 @@ PUBMED_SCRIPT = SKILLS_ROOT / "pubmed_database" / "scripts" / "pubmed_api.py"
 EPMC_SCRIPT = SKILLS_ROOT / "literature_search_europepmc" / "scripts" / "europepmc_api.py"
 OPENALEX_SCRIPT = SKILLS_ROOT / "literature_search_openalex" / "scripts" / "openalex_cli.py"
 CT_SCRIPT = SKILLS_ROOT / "clinical_trials_database" / "scripts" / "clinical_trials_api.py"
+
+
+def load_skill_module(name: str, script_path: Path):
+    spec = importlib.util.spec_from_file_location(name, str(script_path))
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Could not load module from {script_path}")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
 
 
 def get_uv_bin() -> str:
@@ -225,26 +242,19 @@ def upsert_article(conn: sqlite3.Connection, rec: dict[str, Any]) -> None:
         )
 
 
-def harvest_pubmed(uv_bin: str, query: str, raw_dir: Path, conn: sqlite3.Connection) -> int:
-    print("[1/4] Harvesting PubMed via pubmed_api.py...")
+def harvest_pubmed(query: str, raw_dir: Path, conn: sqlite3.Connection) -> int:
+    print("[1/4] Harvesting PubMed via pubmed_api.py...", flush=True)
+    pubmed_mod = load_skill_module("pubmed_api", PUBMED_SCRIPT)
+
     pmids_file = raw_dir / "pubmed_pmids.json"
     if not pmids_file.exists():
-        cmd = [
-            uv_bin,
-            "run",
-            str(PUBMED_SCRIPT),
-            str(pmids_file),
-            "search_pubmed",
-            query,
-            "--max_results",
-            "5000",
-            "--sort_by",
-            "pub_date",
-        ]
-        subprocess.run(cmd, check=True)
+        pmids_res = pubmed_mod.search_pubmed(query, max_results=5000, sort_by="pub_date")
+        if isinstance(pmids_res, dict) and "error" in pmids_res:
+            raise RuntimeError(f"PubMed search error: {pmids_res}")
+        pmids_file.write_text(json.dumps(pmids_res, indent=2), encoding="utf-8")
 
     pmids: list[str] = json.loads(pmids_file.read_text(encoding="utf-8"))
-    print(f"  -> Found {len(pmids)} PMIDs in PubMed (2016-2026).")
+    print(f"  -> Found {len(pmids)} PMIDs in PubMed (2016-2026).", flush=True)
 
     batch_size = 180
     total_batches = (len(pmids) + batch_size - 1) // batch_size
@@ -255,33 +265,14 @@ def harvest_pubmed(uv_bin: str, query: str, raw_dir: Path, conn: sqlite3.Connect
         sum_file = raw_dir / f"pubmed_summaries_{b_idx:03d}.json"
 
         if not abs_file.exists():
-            print(f"  -> Fetching PubMed abstracts batch {b_idx + 1}/{total_batches} ({len(batch)} PMIDs)...")
-            subprocess.run(
-                [
-                    uv_bin,
-                    "run",
-                    str(PUBMED_SCRIPT),
-                    str(abs_file),
-                    "fetch_article_abstracts",
-                    ",".join(batch),
-                ],
-                check=True,
-            )
+            print(f"  -> Fetching PubMed abstracts batch {b_idx + 1}/{total_batches} ({len(batch)} PMIDs)...", flush=True)
+            abs_res = pubmed_mod.fetch_article_abstracts(batch)
+            abs_file.write_text(json.dumps(abs_res, indent=2, ensure_ascii=False), encoding="utf-8")
 
         if not sum_file.exists():
-            print(f"  -> Fetching PubMed summaries batch {b_idx + 1}/{total_batches} ({len(batch)} PMIDs)...")
-            subprocess.run(
-                [
-                    uv_bin,
-                    "run",
-                    str(PUBMED_SCRIPT),
-                    str(sum_file),
-                    "fetch_database_summary",
-                    "pubmed",
-                    ",".join(batch),
-                ],
-                check=True,
-            )
+            print(f"  -> Fetching PubMed summaries batch {b_idx + 1}/{total_batches} ({len(batch)} PMIDs)...", flush=True)
+            sum_res = pubmed_mod.fetch_database_summary("pubmed", batch)
+            sum_file.write_text(json.dumps(sum_res, indent=2, ensure_ascii=False), encoding="utf-8")
 
         abs_list = json.loads(abs_file.read_text(encoding="utf-8"))
         sum_list = json.loads(sum_file.read_text(encoding="utf-8"))
@@ -339,8 +330,9 @@ def harvest_pubmed(uv_bin: str, query: str, raw_dir: Path, conn: sqlite3.Connect
     return len(pmids)
 
 
-def harvest_europepmc(uv_bin: str, query: str, raw_dir: Path, conn: sqlite3.Connection) -> int:
-    print("[2/4] Harvesting Europe PMC (Open Access + Preprints) via europepmc_api.py...")
+def harvest_europepmc(query: str, raw_dir: Path, conn: sqlite3.Connection) -> int:
+    print("[2/4] Harvesting Europe PMC (Open Access + Preprints) via europepmc_api.py...", flush=True)
+    epmc_mod = load_skill_module("europepmc_api", EPMC_SCRIPT)
     cursor = "*"
     page_idx = 0
     total_fetched = 0
@@ -348,25 +340,14 @@ def harvest_europepmc(uv_bin: str, query: str, raw_dir: Path, conn: sqlite3.Conn
     while True:
         page_file = raw_dir / f"europepmc_page_{page_idx:03d}.json"
         if not page_file.exists():
-            print(f"  -> Fetching Europe PMC page {page_idx + 1} (cursor={cursor})...")
-            subprocess.run(
-                [
-                    uv_bin,
-                    "run",
-                    str(EPMC_SCRIPT),
-                    "search",
-                    query,
-                    "--max_results",
-                    "1000",
-                    "--result_type",
-                    "core",
-                    "--cursor",
-                    cursor,
-                    "--output",
-                    str(page_file),
-                ],
-                check=True,
+            print(f"  -> Fetching Europe PMC page {page_idx + 1} (cursor={cursor})...", flush=True)
+            res_data = epmc_mod.search(
+                query=query,
+                max_results=1000,
+                result_type="core",
+                cursor=cursor,
             )
+            page_file.write_text(json.dumps(res_data, indent=2, ensure_ascii=False), encoding="utf-8")
 
         data = json.loads(page_file.read_text(encoding="utf-8"))
         results = data.get("results") or []
@@ -427,46 +408,41 @@ def harvest_europepmc(uv_bin: str, query: str, raw_dir: Path, conn: sqlite3.Conn
         cursor = next_cursor
         page_idx += 1
 
-    print(f"  -> Processed {total_fetched} records from Europe PMC.")
+    print(f"  -> Processed {total_fetched} records from Europe PMC.", flush=True)
     return total_fetched
 
 
 def harvest_openalex(uv_bin: str, search_term: str, start_year: int, end_year: int, raw_dir: Path, conn: sqlite3.Connection) -> int:
-    print("[3/4] Harvesting OpenAlex via openalex_cli.py...")
+    print("[3/4] Harvesting OpenAlex via openalex_cli.py...", flush=True)
+    oa_mod = load_skill_module("openalex_cli", OPENALEX_SCRIPT)
     total_fetched = 0
-    max_pages = 30  # up to 3000 records at 100/page
+    max_pages = 18
 
     for page in range(1, max_pages + 1):
         page_file = raw_dir / f"openalex_page_{page:03d}.json"
         if not page_file.exists():
-            print(f"  -> Fetching OpenAlex page {page}...")
-            filter_expr = f"title_and_abstract.search:{search_term},publication_year:{start_year}-{end_year}"
+            print(f"  -> Fetching OpenAlex page {page}/{max_pages}...", flush=True)
+            filter_expr = f"display_name.search:{search_term},publication_year:{start_year}-{end_year}"
             select_fields = (
                 "id,doi,ids,display_name,publication_year,publication_date,"
-                "type,cited_by_count,is_oa,primary_location,authorships,abstract_inverted_index,language"
+                "type,cited_by_count,open_access,primary_location,authorships,abstract_inverted_index,language"
             )
-            cmd = [
-                uv_bin,
-                "run",
-                str(OPENALEX_SCRIPT),
-                "filter",
-                "works",
-                "--filter",
-                filter_expr,
-                "--select",
-                select_fields,
-                "--sort",
-                "cited_by_count:desc",
-                "--per-page",
-                "100",
-                "--page",
-                str(page),
-            ]
-            res = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
-            if res.returncode != 0:
-                print(f"  -> OpenAlex stopped at page {page} (status {res.returncode}): {res.stderr.strip()[:200]}")
+            import urllib.parse
+            params = urllib.parse.urlencode(
+                {
+                    "filter": filter_expr,
+                    "select": select_fields,
+                    "sort": "cited_by_count:desc",
+                    "per_page": 100,
+                    "page": page,
+                }
+            )
+            try:
+                res_data = oa_mod._API_CLIENT.fetch_json(f"/works?{params}")
+                page_file.write_text(json.dumps(res_data, indent=2, ensure_ascii=False), encoding="utf-8")
+            except Exception as e:
+                print(f"  -> OpenAlex stopped at page {page}: {e}", flush=True)
                 break
-            page_file.write_text(res.stdout, encoding="utf-8")
 
         try:
             data = json.loads(page_file.read_text(encoding="utf-8"))
@@ -506,7 +482,8 @@ def harvest_openalex(uv_bin: str, search_term: str, start_year: int, end_year: i
             w_type = w.get("type") or "article"
             is_preprint = w_type == "preprint" or source_obj.get("type") == "repository"
             cited_by = int(w.get("cited_by_count") or 0)
-            is_oa = bool(w.get("is_oa"))
+            oa_block = w.get("open_access") or {}
+            is_oa = bool(oa_block.get("is_oa"))
             lang = w.get("language") or "en"
 
             upsert_article(
@@ -536,12 +513,12 @@ def harvest_openalex(uv_bin: str, search_term: str, start_year: int, end_year: i
         if len(results) < 100:
             break
 
-    print(f"  -> Processed {total_fetched} records from OpenAlex.")
+    print(f"  -> Processed {total_fetched} records from OpenAlex.", flush=True)
     return total_fetched
 
 
 def harvest_clinical_trials(uv_bin: str, condition: str, raw_dir: Path, conn: sqlite3.Connection) -> int:
-    print("[4/4] Harvesting ClinicalTrials.gov via clinical_trials_api.py...")
+    print("[4/4] Harvesting ClinicalTrials.gov via clinical_trials_api.py...", flush=True)
     ct_file = raw_dir / "clinical_trials.json"
     if not ct_file.exists():
         fields = (
@@ -552,6 +529,8 @@ def harvest_clinical_trials(uv_bin: str, condition: str, raw_dir: Path, conn: sq
         cmd = [
             uv_bin,
             "run",
+            "--with",
+            "pip-system-certs",
             str(CT_SCRIPT),
             "search",
             "--condition",
@@ -631,7 +610,7 @@ def harvest_clinical_trials(uv_bin: str, condition: str, raw_dir: Path, conn: sq
         count += 1
 
     conn.commit()
-    print(f"  -> Imported {count} clinical trials from ClinicalTrials.gov.")
+    print(f"  -> Imported {count} clinical trials from ClinicalTrials.gov.", flush=True)
     return count
 
 
@@ -663,8 +642,8 @@ def main() -> None:
     conn = init_db(db_path)
     uv_bin = get_uv_bin()
 
-    n_pubmed = harvest_pubmed(uv_bin, queries["pubmed"], raw_dir, conn)
-    n_epmc = harvest_europepmc(uv_bin, queries["europepmc"], raw_dir, conn)
+    n_pubmed = harvest_pubmed(queries["pubmed"], raw_dir, conn)
+    n_epmc = harvest_europepmc(queries["europepmc"], raw_dir, conn)
     n_oa = harvest_openalex(
         uv_bin,
         queries["openalex_search"],
@@ -681,11 +660,11 @@ def main() -> None:
     preprints = cur.execute("SELECT COUNT(*) FROM articles WHERE is_preprint = 1").fetchone()[0]
     oa_count = cur.execute("SELECT COUNT(*) FROM articles WHERE is_open_access = 1").fetchone()[0]
 
-    print("\n=== HARVEST SUMMARY ===")
-    print(f"Raw records processed -> PubMed: {n_pubmed} | EuropePMC: {n_epmc} | OpenAlex: {n_oa} | ClinicalTrials: {n_ct}")
-    print(f"Deduplicated SQLite corpus ({db_path}):")
-    print(f"  - Unique articles: {unique_articles} (Open Access: {oa_count}, Preprints: {preprints})")
-    print(f"  - Clinical trials: {unique_trials}")
+    print("\n=== HARVEST SUMMARY ===", flush=True)
+    print(f"Raw records processed -> PubMed: {n_pubmed} | EuropePMC: {n_epmc} | OpenAlex: {n_oa} | ClinicalTrials: {n_ct}", flush=True)
+    print(f"Deduplicated SQLite corpus ({db_path}):", flush=True)
+    print(f"  - Unique articles: {unique_articles} (Open Access: {oa_count}, Preprints: {preprints})", flush=True)
+    print(f"  - Clinical trials: {unique_trials}", flush=True)
 
 
 if __name__ == "__main__":
