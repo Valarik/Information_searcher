@@ -22,12 +22,16 @@ def init_db(db_path: str | Path) -> sqlite3.Connection:
             doi TEXT,
             openalex_id TEXT,
             title TEXT NOT NULL,
+            norm_title TEXT,
             abstract TEXT,
             journal TEXT,
             pub_year INTEGER,
             pub_date TEXT,
             authors TEXT,
+            language TEXT DEFAULT 'eng',
             pub_types TEXT,
+            is_preprint INTEGER DEFAULT 0,
+            prisma_status TEXT DEFAULT 'included',
             evidence_tier INTEGER DEFAULT 3,
             clusters TEXT,
             cited_by_count INTEGER DEFAULT 0,
@@ -39,9 +43,11 @@ def init_db(db_path: str | Path) -> sqlite3.Connection:
         );
 
         CREATE INDEX IF NOT EXISTS idx_articles_doi ON articles(doi);
+        CREATE INDEX IF NOT EXISTS idx_articles_norm_title ON articles(norm_title);
         CREATE INDEX IF NOT EXISTS idx_articles_pmcid ON articles(pmcid);
         CREATE INDEX IF NOT EXISTS idx_articles_year ON articles(pub_year);
         CREATE INDEX IF NOT EXISTS idx_articles_tier ON articles(evidence_tier);
+        CREATE INDEX IF NOT EXISTS idx_articles_prisma ON articles(prisma_status);
 
         CREATE TABLE IF NOT EXISTS clinical_trials (
             nct_id TEXT PRIMARY KEY,
