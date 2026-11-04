@@ -21,9 +21,9 @@
 
 ### Генерация отчетов в 3 режимах с де-ИИзацией (SYNT)
 
-- [ ] **SYNT-01**: Написание полного отчета диссертационного уровня (`reports/dupuytren/dissertation_report.md`) со строгим соблюдением правил `ru-medical-humanizer`, сводными таблицами и верифицированными ссылками `[PMID: ...]`.
-- [ ] **SYNT-02**: Генерация краткого аналитического содержания (`reports/dupuytren/executive_summary.md`) с ключевыми выводами за 10 лет и сравнительными матрицами.
-- [ ] **SYNT-03**: Формирование модульной внутренней базы знаний (`reports/dupuytren/knowledge_base/`) по мишеням, факторам риска, методам лечения и ключевым РКИ.
+- [x] **SYNT-01**: Написание полного отчета диссертационного уровня (`reports/dupuytren/dissertation_report.md`) со строгим соблюдением правил `ru-medical-humanizer`, сводными таблицами и верифицированными ссылками `[PMID: ...]`.
+- [x] **SYNT-02**: Генерация краткого аналитического содержания (`reports/dupuytren/executive_summary.md`) с ключевыми выводами за 10 лет и сравнительными матрицами.
+- [x] **SYNT-03**: Формирование модульной внутренней базы знаний (`reports/dupuytren/knowledge_base/`) по мишеням, факторам риска, методам лечения и ключевым РКИ.
 
 ### Веб-интерфейс и универсальный запуск (UI)
 
@@ -53,9 +53,9 @@
 | EXTR-02 | Phase 2 | Complete |
 | EXTR-03 | Phase 2 | Complete |
 | EXTR-04 | Phase 2 | Complete |
-| SYNT-01 | Phase 3 | Pending |
-| SYNT-02 | Phase 3 | Pending |
-| SYNT-03 | Phase 3 | Pending |
+| SYNT-01 | Phase 3 | Complete |
+| SYNT-02 | Phase 3 | Complete |
+| SYNT-03 | Phase 3 | Complete |
 | UI-01 | Phase 4 | Pending |
 
 **Coverage:**
