@@ -359,7 +359,7 @@ def download_fulltexts_tier1_to_3(
         SELECT id, pmcid, sources, is_open_access, evidence_tier
         FROM articles
         WHERE prisma_status = 'included'
-          AND evidence_tier IN (1, 2, 3)
+          AND evidence_tier IN (1, 2, 3, 4)
           AND pmcid IS NOT NULL
           AND pmcid != ''
         ORDER BY evidence_tier ASC, cited_by_count DESC
