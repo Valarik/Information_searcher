@@ -14,8 +14,9 @@ data/*/fulltext_xml/
 *.db-shm
 *.db-wal
 
-# Local agent harness & IDE files
+# Local agent harness, IDE files & archived nosologies
 .agent/
 .licenses/
 .vscode/
 .idea/
+archive/

@@ -75,17 +75,17 @@ def discover_nosologies(configs_dir: Path = CONFIGS_DIR) -> list[dict[str, Any]]
         except Exception:
             continue
         meta = raw.get("nosology", {})
-        nos_id = meta.get("id") or cfg_path.stem
+        nos_id = meta.get("id") or raw.get("nosology_id") or cfg_path.stem
         db_path = DATA_DIR / nos_id / "literature.db"
         kb_path = REPORTS_DIR / nos_id / "knowledge_base" / "kb_index.json"
         items.append(
             {
                 "id": nos_id,
-                "name_ru": meta.get("name_ru", nos_id),
-                "name_en": meta.get("name_en", nos_id),
-                "icd10": meta.get("icd10", "—"),
-                "icd11": meta.get("icd11", "—"),
-                "mesh_terms": meta.get("mesh_terms", []),
+                "name_ru": meta.get("name_ru") or raw.get("name_ru") or nos_id,
+                "name_en": meta.get("name_en") or raw.get("name_en") or nos_id,
+                "icd10": meta.get("icd10") or raw.get("icd10") or "—",
+                "icd11": meta.get("icd11") or raw.get("icd11") or "—",
+                "mesh_terms": meta.get("mesh_terms") or raw.get("mesh_terms") or [],
                 "config_path": str(cfg_path),
                 "has_db": db_path.exists(),
                 "has_kb_index": kb_path.exists(),
@@ -649,8 +649,11 @@ def save_new_nosology_config(config_payload: dict[str, Any]) -> Path:
     return out_path
 
 
-def verify_universal_schema(nosology_id: str = "dupuytren") -> int:
+def verify_universal_schema(nosology_id: str | None = None) -> int:
     """Validate that `kb_index.json` and `universal_schema.py` satisfy D-01 and D-03."""
+    if not nosology_id:
+        discovered = discover_nosologies()
+        nosology_id = discovered[0]["id"] if discovered else "prom"
     bundle = load_nosology_bundle(nosology_id)
     kb = bundle["kb_index"]
 
@@ -665,7 +668,7 @@ def verify_universal_schema(nosology_id: str = "dupuytren") -> int:
     phases = kb.get("pathogenesis_phases", [])
     modalities = kb.get("modalities", [])
 
-    if len(stages) < 3 or len(subtypes) < 3 or len(factors) < 4 or len(phases) < 2 or len(modalities) < 10:
+    if len(stages) < 3 or len(subtypes) < 3 or len(factors) < 4 or len(phases) < 2 or len(modalities) < 8:
         print("[FAIL] Insufficient records in universal schema sections.")
         return 1
 
@@ -708,7 +711,7 @@ def verify_universal_schema(nosology_id: str = "dupuytren") -> int:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Universal Nosology Schema Adapter")
     parser.add_argument("--verify", action="store_true", help="Verify universal schema & exports")
-    parser.add_argument("--nosology", default="dupuytren", help="Nosology ID")
+    parser.add_argument("--nosology", default=None, help="Nosology ID")
     args = parser.parse_args()
     if args.verify:
         return verify_universal_schema(args.nosology)

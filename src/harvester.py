@@ -248,7 +248,7 @@ def harvest_pubmed(query: str, raw_dir: Path, conn: sqlite3.Connection) -> int:
 
     pmids_file = raw_dir / "pubmed_pmids.json"
     if not pmids_file.exists():
-        pmids_res = pubmed_mod.search_pubmed(query, max_results=5000, sort_by="pub_date")
+        pmids_res = pubmed_mod.search_pubmed(query, max_results=2000, sort_by="pub_date")
         if isinstance(pmids_res, dict) and "error" in pmids_res:
             raise RuntimeError(f"PubMed search error: {pmids_res}")
         pmids_file.write_text(json.dumps(pmids_res, indent=2), encoding="utf-8")
@@ -403,7 +403,7 @@ def harvest_europepmc(query: str, raw_dir: Path, conn: sqlite3.Connection) -> in
 
         conn.commit()
         next_cursor = data.get("nextCursorMark")
-        if not next_cursor or next_cursor == cursor or len(results) < 1000:
+        if not next_cursor or next_cursor == cursor or len(results) < 1000 or page_idx >= 2:
             break
         cursor = next_cursor
         page_idx += 1
@@ -416,7 +416,7 @@ def harvest_openalex(uv_bin: str, search_term: str, start_year: int, end_year: i
     print("[3/4] Harvesting OpenAlex via openalex_cli.py...", flush=True)
     oa_mod = load_skill_module("openalex_cli", OPENALEX_SCRIPT)
     total_fetched = 0
-    max_pages = 18
+    max_pages = 10
 
     for page in range(1, max_pages + 1):
         page_file = raw_dir / f"openalex_page_{page:03d}.json"

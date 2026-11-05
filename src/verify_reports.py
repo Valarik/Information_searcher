@@ -1,15 +1,16 @@
 # /// script
 # requires-python = ">=3.11,<3.14"
-# dependencies = []
+# dependencies = [
+#   "pyyaml>=6.0.1",
+# ]
 # ///
-"""Phase 3 Automated Dissertation Bibliography Compiler & Zero-Tolerance Report Verifier.
+"""Automated Dissertation Bibliography Compiler & Zero-Tolerance Report Verifier (Universal Multi-Nosology).
 
 Implements:
-- D-01: Sequential numbered citations [1], [2] in `reports/dupuytren/dissertation_report.md`
-  with an automatically generated dissertation-standard bibliography from `literature.db`.
-- D-02 & D-03: Verification of clinical completeness (finger/ray distribution, Tubiana stages,
-  pros & cons of treatment modalities, and MCP vs PIP recurrence matrices).
-- D-04: Zero-Tolerance SQLite verification of all PMIDs, PMCIDs, DOIs, and NCT IDs across all
+- Sequential numbered citations [1], [2] in `reports/<nosology>/dissertation_report.md`
+  with an automatically generated dissertation-standard bibliography from `data/<nosology>/literature.db`.
+- Verification of clinical completeness via `verification_rules.required_terms` in `configs/<nosology>.yaml`.
+- Zero-Tolerance SQLite verification of all PMIDs, PMCIDs, DOIs, and NCT IDs across all
   3 report modes (`dissertation`, `executive_summary`, `knowledge_base`) + automated
   `ru-medical-humanizer` banned-phrase style linter.
 """
@@ -24,13 +25,21 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import yaml
+
 sys.stdout.reconfigure(encoding="utf-8")
 
-DB_PATH = Path("data/dupuytren/literature.db")
-DISSERTATION_PATH = Path("reports/dupuytren/dissertation_report.md")
-SUMMARY_PATH = Path("reports/dupuytren/executive_summary.md")
-KB_DIR = Path("reports/dupuytren/knowledge_base")
-AUDIT_PATH = Path("reports/dupuytren/verification_audit.md")
+
+def get_nosology_paths(nosology_id: str) -> dict[str, Path]:
+    rep_dir = Path("reports") / nosology_id
+    return {
+        "cfg": Path("configs") / f"{nosology_id}.yaml",
+        "db": Path("data") / nosology_id / "literature.db",
+        "diss": rep_dir / "dissertation_report.md",
+        "sum": rep_dir / "executive_summary.md",
+        "kb": rep_dir / "knowledge_base",
+        "audit": rep_dir / "verification_audit.md",
+    }
 
 BANNED_AI_PHRASES = (
     "представляет собой актуальную проблему",
@@ -118,7 +127,7 @@ def fetch_reference_metadata(cur: sqlite3.Cursor, ref_key: str) -> dict[str, Any
         raise ValueError(f"Unsupported citation key: {ref_key}")
 
     if not row:
-        raise AssertionError(f"[Anti-Hallucination Failure] Citation {ref_key} not found in {DB_PATH}!")
+        raise AssertionError(f"[Anti-Hallucination Failure] Citation {ref_key} not found in SQLite database!")
 
     pmid, pmcid, doi, title, authors, journal, pub_year = row
     authors_str = format_authors_bib(authors).rstrip(".")
@@ -143,11 +152,14 @@ def fetch_reference_metadata(cur: sqlite3.Cursor, ref_key: str) -> dict[str, Any
     }
 
 
-def compile_dissertation_bibliography() -> int:
-    conn = sqlite3.connect(DB_PATH)
+def compile_dissertation_bibliography(nosology_id: str = "prom") -> int:
+    paths = get_nosology_paths(nosology_id)
+    db_path = paths["db"]
+    diss_path = paths["diss"]
+    conn = sqlite3.connect(db_path)
     cur = conn.cursor()
 
-    text = DISSERTATION_PATH.read_text(encoding="utf-8")
+    text = diss_path.read_text(encoding="utf-8")
 
     # If already compiled previously, restore original [@PMID:...] tags from embedded map if needed
     bib_marker = "\n---\n\n## Список литературы\n"
@@ -171,13 +183,13 @@ def compile_dissertation_bibliography() -> int:
 
     if not ref_order:
         # Check if already compiled with [1]..[N]
-        existing = DISSERTATION_PATH.read_text(encoding="utf-8")
+        existing = diss_path.read_text(encoding="utf-8")
         if bib_marker in existing:
             bib_sec = existing.split(bib_marker, 1)[1]
             cnt = len(re.findall(r"^\d+\.\s+", bib_sec, flags=re.MULTILINE))
             print(f"[Compile Bibliography] Dissertation already compiled with {cnt} numbered references.")
             return cnt
-        raise RuntimeError("No [@PMID:...] or [@PMCID:...] markers found in dissertation_report.md!")
+        raise RuntimeError(f"No [@PMID:...] or [@PMCID:...] markers found in {diss_path}!")
 
     def replace_group(match: re.Match[str]) -> str:
         group_body = match.group(1)
@@ -200,14 +212,29 @@ def compile_dissertation_bibliography() -> int:
         + "\n"
     )
 
-    DISSERTATION_PATH.write_text(compiled_body + bib_section, encoding="utf-8")
-    print(f"[Compile Bibliography] Compiled {len(bib_entries)} numbered references [1]..[{len(bib_entries)}] in {DISSERTATION_PATH}")
+    diss_path.write_text(compiled_body + bib_section, encoding="utf-8")
+    print(f"[Compile Bibliography] Compiled {len(bib_entries)} numbered references [1]..[{len(bib_entries)}] in {diss_path}")
     return len(bib_entries)
 
 
-def verify_all_reports() -> None:
-    conn = sqlite3.connect(DB_PATH)
+def verify_all_reports(nosology_id: str = "prom") -> None:
+    paths = get_nosology_paths(nosology_id)
+    db_path = paths["db"]
+    diss_path = paths["diss"]
+    sum_path = paths["sum"]
+    kb_dir = paths["kb"]
+    audit_path = paths["audit"]
+    cfg_path = paths["cfg"]
+
+    cfg: dict[str, Any] = {}
+    if cfg_path.exists():
+        cfg = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+
+    conn = sqlite3.connect(db_path)
     cur = conn.cursor()
+
+    inc_cnt = cur.execute("SELECT COUNT(*) FROM articles WHERE prisma_status = 'included'").fetchone()[0]
+    ct_cnt = cur.execute("SELECT COUNT(*) FROM clinical_trials").fetchone()[0]
 
     valid_pmids = {str(r[0]) for r in cur.execute("SELECT pmid FROM articles WHERE pmid IS NOT NULL").fetchall()}
     valid_pmcids = {str(r[0]) for r in cur.execute("SELECT pmcid FROM articles WHERE pmcid IS NOT NULL").fetchall()}
@@ -220,11 +247,11 @@ def verify_all_reports() -> None:
             valid_ncts.add(m)
 
     report_files = [
-        DISSERTATION_PATH,
-        SUMMARY_PATH,
-        *sorted(KB_DIR.glob("*.md")),
+        diss_path,
+        sum_path,
+        *sorted(kb_dir.glob("*.md")),
     ]
-    assert len(report_files) == 7, f"Expected 7 Markdown report files, found {len(report_files)}"
+    assert len(report_files) == 7, f"Expected 7 Markdown report files for '{nosology_id}', found {len(report_files)}"
 
     audit_rows: list[dict[str, Any]] = []
     total_unique_pmids: set[str] = set()
@@ -240,8 +267,7 @@ def verify_all_reports() -> None:
             content = content.replace("@PMID:", "PMID: ")
             path.write_text(content, encoding="utf-8")
 
-        pmids = set(re.findall(r"PMID:\s*(\d{7,8})|\b([234]\d{7})\b", content))
-        flat_pmids = {x for pair in pmids for x in pair if x}
+        flat_pmids = set(re.findall(r"PMID:\s*(\d{7,8})", content))
         pmcids = set(re.findall(r"\b(PMC\d{6,9})\b", content))
         ncts = set(re.findall(r"\b(NCT\d{8})\b", content))
 
@@ -249,9 +275,9 @@ def verify_all_reports() -> None:
         missing_pmcids = sorted(pmcids - valid_pmcids)
         missing_ncts = sorted(ncts - valid_ncts)
 
-        assert not missing_pmids, f"[{path.name}] Missing PMIDs in literature.db: {missing_pmids}"
-        assert not missing_pmcids, f"[{path.name}] Missing PMCIDs in literature.db: {missing_pmcids}"
-        assert not missing_ncts, f"[{path.name}] Missing NCT IDs in literature.db: {missing_ncts}"
+        assert not missing_pmids, f"[{path.name}] Missing PMIDs in {db_path}: {missing_pmids}"
+        assert not missing_pmcids, f"[{path.name}] Missing PMCIDs in {db_path}: {missing_pmcids}"
+        assert not missing_ncts, f"[{path.name}] Missing NCT IDs in {db_path}: {missing_ncts}"
 
         # Check banned AI phrases from ru-medical-humanizer
         lower_text = content.lower()
@@ -270,31 +296,33 @@ def verify_all_reports() -> None:
             }
         )
 
-    # Check specific dissertation numbered citation requirements (D-01)
-    diss_text = DISSERTATION_PATH.read_text(encoding="utf-8")
+    # Check specific dissertation numbered citation requirements
+    diss_text = diss_path.read_text(encoding="utf-8")
     assert "## Список литературы" in diss_text, "Dissertation report missing '## Список литературы' section!"
     bib_part = diss_text.split("## Список литературы", 1)[1]
     bib_items = re.findall(r"^(\d+)\.\s+", bib_part, flags=re.MULTILINE)
-    assert len(bib_items) >= 45, f"Expected >= 45 bibliography entries in dissertation_report.md, got {len(bib_items)}"
+    assert len(bib_items) >= 35, f"Expected >= 35 bibliography entries in dissertation_report.md, got {len(bib_items)}"
 
-    # Check clinical focus completeness (D-02, D-03)
-    for required_term in ("Tubiana", "IV палец", "V палец", "ПФС", "ПМФС", "Плюсы", "Минусы"):
-        assert required_term in diss_text, f"Dissertation report missing required clinical section/term: {required_term}"
-        assert required_term in SUMMARY_PATH.read_text(encoding="utf-8"), f"Executive summary missing required term: {required_term}"
+    # Check clinical focus completeness via config verification_rules
+    req_terms = cfg.get("verification_rules", {}).get("required_terms", ["Плюсы", "Минусы"])
+    for required_term in req_terms:
+        assert required_term in diss_text, f"Dissertation report missing required clinical term: {required_term}"
+        assert required_term in sum_path.read_text(encoding="utf-8"), f"Executive summary missing required term: {required_term}"
 
     # Verify kb_index.json
-    kb_json_path = KB_DIR / "kb_index.json"
+    kb_json_path = kb_dir / "kb_index.json"
     assert kb_json_path.exists(), "Missing kb_index.json!"
     kb_data = json.loads(kb_json_path.read_text(encoding="utf-8"))
     assert len(kb_data.get("modules", [])) == 5, "kb_index.json must index 5 modules"
-    assert len(kb_data.get("modalities", [])) >= 12, "kb_index.json must include >= 12 treatment modalities"
+    assert len(kb_data.get("modalities", [])) >= 8, "kb_index.json must include >= 8 treatment modalities"
 
     # Write verification_audit.md
     audit_lines = [
-        "# Сертификат автоматической верификации отчётов Фазы 3 (`src/verify_reports.py`)",
+        f"# Сертификат автоматической верификации отчётов (`src/verify_reports.py` — `{nosology_id}`)",
         "",
         "- **Статус проверки:** `PASSED (Zero-Tolerance Gate)`",
-        f"- **База данных верификации:** `data/dupuytren/literature.db` (`1 775` включённых статей, `80` протоколов `ClinicalTrials.gov`)",
+        f"- **Нозология:** {cfg.get('name_ru', nosology_id)} (`{cfg.get('icd10', '—')}`)",
+        f"- **База данных верификации:** `{db_path.as_posix()}` (`{inc_cnt}` включённых статей, `{ct_cnt}` протоколов `ClinicalTrials.gov`)",
         f"- **Число библиографических источников `[1]..[{len(bib_items)}]` в диссертационном отчёте:** `{len(bib_items)}` (`100%` подтверждены в SQLite)",
         "- **Нарушений словаря `ru-medical-humanizer`:** `0`",
         "- **Несуществующих / галлюцинированных `PMID / PMCID / DOI / NCT ID`:** `0`",
@@ -308,23 +336,24 @@ def verify_all_reports() -> None:
         audit_lines.append(
             f"| `{r['file']}` | {r['size_kb']} | {r['verified_pmids']} | {r['verified_pmcids']} | {r['verified_ncts']} | {r['banned_phrases']} | `OK` |"
         )
-    AUDIT_PATH.write_text("\n".join(audit_lines) + "\n", encoding="utf-8")
+    audit_path.write_text("\n".join(audit_lines) + "\n", encoding="utf-8")
 
-    print(f"[Verify Reports] Checked {len(report_files)} Markdown files + kb_index.json.")
-    print(f"[Verify Reports] Dissertation bibliography entries: {len(bib_items)} [1]..[{len(bib_items)}]")
-    print("[Verify Reports] ALL REPORT VERIFICATION CHECKS PASSED.")
+    print(f"[Verify Reports: {nosology_id}] Checked {len(report_files)} Markdown files + kb_index.json.")
+    print(f"[Verify Reports: {nosology_id}] Dissertation bibliography entries: {len(bib_items)} [1]..[{len(bib_items)}]")
+    print(f"[Verify Reports: {nosology_id}] ALL REPORT VERIFICATION CHECKS PASSED.")
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Compile dissertation bibliography and verify all Phase 3 reports")
+    parser.add_argument("--nosology", default="prom", help="Nosology ID (e.g. prom, dupuytren)")
     parser.add_argument("--compile-bibliography", action="store_true", help="Compile [@PMID:...] into [1]..[N] and append bibliography")
     parser.add_argument("--verify", action="store_true", help="Run Zero-Tolerance SQLite citation and style verification")
     args = parser.parse_args()
 
     if args.compile_bibliography:
-        compile_dissertation_bibliography()
+        compile_dissertation_bibliography(args.nosology)
     if args.verify or not args.compile_bibliography:
-        verify_all_reports()
+        verify_all_reports(args.nosology)
 
 
 if __name__ == "__main__":

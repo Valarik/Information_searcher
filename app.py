@@ -94,7 +94,7 @@ def render_sidebar(nosologies: list[dict[str, Any]]) -> tuple[str, dict[str, Any
         st.markdown("## 🧬 Нозологический навигатор")
         options = {item["id"]: f"{item['name_ru']} ({item['icd10']})" for item in nosologies}
         if not options:
-            options = {"dupuytren": "Контрактура Дюпюитрена (M72.0)"}
+            options = {"prom": "Преждевременное излитие околоплодных вод (O42)"}
 
         selected_id = st.selectbox(
             "Выберите нозологию (`configs/*.yaml`):",
@@ -188,7 +188,7 @@ def render_tab_reports(bundle: dict[str, Any]) -> None:
         search_query = st.text_input(
             "🔍 Поиск термина в тексте отчёта:",
             value="",
-            placeholder="Например: Tubiana, мизинец, адалимумаб, ПМФС...",
+            placeholder="Введите клинический термин, биомаркер, препарат или PMID...",
             key="tab1_search_query",
         )
 
@@ -584,13 +584,7 @@ def render_tab_clinical_matrix(bundle: dict[str, Any]) -> None:
         modalities = kb.get("modalities", [])
         if modalities:
             mod_names = [m["name"] for m in modalities]
-            default_picks = [
-                m
-                for m in mod_names
-                if "PNF" in m or "Коллагеназа" in m or "селективная" in m or "Дермофасциэктомия" in m
-            ][:3]
-            if len(default_picks) < 2:
-                default_picks = mod_names[:3]
+            default_picks = mod_names[:3]
 
             picked_names = st.multiselect(
                 "Выберите от 2 до 4 методик для детального сравнения бок-о-бок:",
@@ -814,7 +808,7 @@ def render_tab_prisma_explorer(bundle: dict[str, Any]) -> None:
             cats = ["Все"] + sorted(df_mech["category"].dropna().unique().tolist())
             c_pick = st.selectbox("Категория механизма:", cats, key="t3_mech_cat")
         with c2:
-            kw_m = st.text_input("Поиск по генам/мишеням (WNT7B, SFRP4, TGF-β1, YAP1...):", value="", key="t3_mech_kw")
+            kw_m = st.text_input("Поиск по генам, цитокинам, рецепторам или сигнальным путям:", value="", key="t3_mech_kw")
 
         view = df_mech.copy()
         if c_pick != "Все":
@@ -881,7 +875,13 @@ def render_tab_configurator_and_audit(bundle: dict[str, Any]) -> None:
         st.markdown("#### ✅ Сертификат верификации (`Zero-Tolerance Gate`)")
         if st.button("🔄 Запустить повторный аудит `verify_reports.py --verify`", key="btn_run_verify"):
             res = subprocess.run(
-                [sys.executable, str(PROJECT_ROOT / "src" / "verify_reports.py"), "--verify"],
+                [
+                    sys.executable,
+                    str(PROJECT_ROOT / "src" / "verify_reports.py"),
+                    "--nosology",
+                    bundle["nosology_id"],
+                    "--verify",
+                ],
                 capture_output=True,
                 text=True,
                 encoding="utf-8",
@@ -1000,7 +1000,9 @@ def run_self_test() -> int:
     sys.argv = [arg for arg in sys.argv if arg != "--self-test"]
 
     print("[1/3] Running universal schema & export verification...")
-    rc = verify_universal_schema("dupuytren")
+    discovered = discover_nosologies()
+    active_nos = discovered[0]["id"] if discovered else "prom"
+    rc = verify_universal_schema(active_nos)
     if rc != 0:
         return rc
 

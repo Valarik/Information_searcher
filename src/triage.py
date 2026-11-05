@@ -149,30 +149,40 @@ def classify_prisma_status(
     language: str | None,
     start_year: int,
     end_year: int,
+    triage_rules: dict[str, Any] | None = None,
 ) -> str:
-    """Apply D-01, D-03, D-04 exclusion filters."""
+    """Apply nosology-agnostic PRISMA inclusion/exclusion filters from `triage_rules`."""
     if pub_year is not None and (pub_year < start_year or pub_year > end_year):
         return "excluded_out_of_date_range"
 
     combined = f"{title}\n{abstract or ''}".lower()
 
-    # D-04: Exclude eponymous Dupuytren ankle/fibular fracture
-    has_ankle = any(t in combined for t in ANKLE_FRACTURE_TERMS)
-    has_hand = any(t in combined for t in HAND_PALMAR_TERMS)
-    if has_ankle and not has_hand:
-        return "excluded_ankle_fracture"
+    if triage_rules:
+        for rule in triage_rules.get("exclusion_rules", []):
+            triggers = [t.lower() for t in rule.get("trigger_terms", [])]
+            unless = [u.lower() for u in rule.get("unless_terms", [])]
+            if any(t in combined for t in triggers) and not any(u in combined for u in unless):
+                return rule.get("status", "excluded_custom_rule")
 
-    # D-03: Exclude isolated Peyronie / Ledderhose without Dupuytren / palmar focus
-    has_dupuytren = any(t in combined for t in DUPUYTREN_CORE_TERMS)
-    has_other_fibro = any(t in combined for t in ISOLATED_OTHER_FIBROMATOSIS_TERMS)
-    if has_other_fibro and not has_dupuytren:
-        return "excluded_isolated_peyronie_ledderhose"
+        core_terms = [t.lower() for t in triage_rules.get("core_terms", [])]
+        ctx_terms = [t.lower() for t in triage_rules.get("context_terms", [])]
+        has_core = any(t in combined for t in core_terms) if core_terms else True
+        has_ctx = any(t in combined for t in ctx_terms) if ctx_terms else True
+        if not has_core or not has_ctx:
+            return "excluded_offtopic"
+    else:
+        has_ankle = any(t in combined for t in ANKLE_FRACTURE_TERMS)
+        has_hand = any(t in combined for t in HAND_PALMAR_TERMS)
+        if has_ankle and not has_hand:
+            return "excluded_ankle_fracture"
+        has_dupuytren = any(t in combined for t in DUPUYTREN_CORE_TERMS)
+        has_other_fibro = any(t in combined for t in ISOLATED_OTHER_FIBROMATOSIS_TERMS)
+        if has_other_fibro and not has_dupuytren:
+            return "excluded_isolated_peyronie_ledderhose"
+        if not has_dupuytren and not ("fibromatosis" in combined and has_hand):
+            return "excluded_offtopic"
 
-    # D-04: Exclude off-topic papers where neither Dupuytren nor palmar fibromatosis is present
-    if not has_dupuytren and not ("fibromatosis" in combined and has_hand):
-        return "excluded_offtopic"
-
-    # D-01: Foreign language without English/Russian abstract
+    # Foreign language without English/Russian abstract
     lang = (language or "eng").lower()
     is_en_ru = lang.startswith(("en", "ru", "und"))
     if not is_en_ru and not has_english_or_russian_text(abstract):
@@ -185,6 +195,7 @@ def classify_evidence_tier(
     title: str,
     abstract: str | None,
     pub_types: list[str],
+    rare_complication_terms: tuple[str, ...] | list[str] = RARE_COMPLICATION_TERMS,
 ) -> tuple[int, list[str]]:
     """Classify included articles into Tier 1-4 per D-05 and D-06."""
     t_lower = title.lower()
@@ -209,7 +220,7 @@ def classify_evidence_tier(
         "retracted publication",
     )
     if any(m in pt_lower for m in tier4_pt_markers):
-        if any(rc in combined for rc in RARE_COMPLICATION_TERMS):
+        if any(rc.lower() in combined for rc in rare_complication_terms):
             if "Rare Complication Case [D-05]" not in updated_types:
                 updated_types.append("Rare Complication Case [D-05]")
         return 4, updated_types
@@ -227,7 +238,7 @@ def classify_evidence_tier(
         "author response",
     )
     if any(m in t_lower for m in tier4_title_markers):
-        if any(rc in combined for rc in RARE_COMPLICATION_TERMS):
+        if any(rc.lower() in combined for rc in rare_complication_terms):
             if "Rare Complication Case [D-05]" not in updated_types:
                 updated_types.append("Rare Complication Case [D-05]")
         return 4, updated_types
@@ -533,6 +544,10 @@ def generate_prisma_report(
         "SELECT overall_status, COUNT(*) as cnt FROM clinical_trials GROUP BY overall_status ORDER BY cnt DESC"
     ).fetchall()
 
+    excl_breakdown = "<br/>".join(
+        f"- {k}: {v}" for k, v in sorted(status_map.items()) if k != "included"
+    ) or "- Нет исключённых"
+
     report_path.parent.mkdir(parents=True, exist_ok=True)
     lines = [
         f"# PRISMA-статистика и карта корпуса: {cfg.get('name_ru')}",
@@ -546,8 +561,8 @@ def generate_prisma_report(
         "flowchart TD",
         f'    A["Первичная выгрузка из баз (N = {total_raw})<br/>PubMed: {raw_pubmed} | Europe PMC: {raw_epmc} | OpenAlex: {raw_oa}"] --> B["После дедупликации по PMID / DOI / Заголовку<br/>Уникальных записей: N = {total_unique}<br/>(Удалено дублей: {duplicates_removed})"]',
         f'    B --> C["PRISMA-скрининг заголовков и абстрактов (N = {total_unique})"]',
-        f'    C --> D["Исключено по критериям D-01, D-03, D-04 (N = {excluded_total})<br/>- Перелом лодыжки Дюпюитрена: {status_map.get("excluded_ankle_fracture", 0)}<br/>- Изолированный Пейрони/Леддерхозе: {status_map.get("excluded_isolated_peyronie_ledderhose", 0)}<br/>- Не по теме / вне 2016-2026: {status_map.get("excluded_offtopic", 0) + status_map.get("excluded_out_of_date_range", 0)}<br/>- Без EN/RU абстракта: {status_map.get("excluded_foreign_no_abstract", 0)}"]',
-        f'    C --> E["Включено в итоговый корпус болезни Дюпюитрена<br/>N = {included_total} статей (+ {ct_total} записей ClinicalTrials.gov)"]',
+        f'    C --> D["Исключено по критериям PRISMA (N = {excluded_total})<br/>{excl_breakdown}"]',
+        f'    C --> E["Включено в итоговый корпус ({cfg.get("name_ru")})<br/>N = {included_total} статей (+ {ct_total} записей ClinicalTrials.gov)"]',
         f'    E --> F["Полнотекстовые XML (Europe PMC OA, Tier 1-3): N = {fulltext_total}"]',
         "```",
         "",
@@ -620,9 +635,9 @@ def generate_prisma_report(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="PRISMA triage, Evidence Tier classification, and Full-Text XML fetcher.")
-    parser.add_argument("--config", type=str, default="configs/dupuytren.yaml", help="Path to nosology YAML config")
+    parser.add_argument("--config", type=str, default="configs/prom.yaml", help="Path to nosology YAML config")
     parser.add_argument("--verify-only", action="store_true", help="Run verification checks without re-downloading XMLs")
-    parser.add_argument("--max-xml", type=int, default=1000, help="Max full-text XMLs to download from Europe PMC")
+    parser.add_argument("--max-xml", type=int, default=200, help="Max full-text XMLs to download from Europe PMC")
     args = parser.parse_args()
 
     cfg_path = Path(args.config)
@@ -631,6 +646,12 @@ def main() -> None:
     start_year = int(cfg["date_range"]["start_year"])
     end_year = int(cfg["date_range"]["end_year"])
     clusters_cfg = cfg["clusters"]
+    triage_rules = cfg.get("triage_rules")
+    rare_comp_terms = (
+        triage_rules.get("rare_complication_terms", RARE_COMPLICATION_TERMS)
+        if triage_rules
+        else RARE_COMPLICATION_TERMS
+    )
 
     data_dir = Path("data") / nosology_id
     raw_dir = data_dir / "raw"
@@ -644,7 +665,7 @@ def main() -> None:
     rows = cur.execute(
         "SELECT id, title, abstract, pub_year, language, pub_types FROM articles"
     ).fetchall()
-    print(f"[Triage] Screening and classifying {len(rows)} unique records...")
+    print(f"[Triage] Screening and classifying {len(rows)} unique records for '{nosology_id}'...")
 
     for r in rows:
         row_id = r["id"]
@@ -657,9 +678,13 @@ def main() -> None:
         except Exception:
             pub_types = []
 
-        p_status = classify_prisma_status(title, abstract, pub_year, lang, start_year, end_year)
+        p_status = classify_prisma_status(
+            title, abstract, pub_year, lang, start_year, end_year, triage_rules=triage_rules
+        )
         if p_status == "included":
-            tier, updated_types = classify_evidence_tier(title, abstract, pub_types)
+            tier, updated_types = classify_evidence_tier(
+                title, abstract, pub_types, rare_complication_terms=rare_comp_terms
+            )
             matched_clusters = assign_clusters(title, abstract, clusters_cfg)
         else:
             tier = 4
