@@ -35,6 +35,10 @@ import plotly.graph_objects as go
 import streamlit as st
 import yaml
 
+from src.docx_exporter import (
+    build_docx_bytes_from_markdown,
+    build_docx_bytes_from_markdown_sections,
+)
 from src.universal_schema import (
     dataframe_to_csv_bytes,
     discover_nosologies,
@@ -129,7 +133,38 @@ def render_sidebar(nosologies: list[dict[str, Any]]) -> tuple[str, dict[str, Any
         c6.metric("Полнотекстов XML", f"{stats.get('fulltext_xml_count', 233)}")
 
         st.divider()
-        st.markdown("### 📥 Быстрый экспорт отчётов")
+        st.markdown("### 📥 Быстрый экспорт отчётов (Word .docx / MD / HTML)")
+        DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        if bundle["dissertation_md"]:
+            st.download_button(
+                "📘 Скачать Диссертацию (.docx)",
+                data=build_docx_bytes_from_markdown(bundle["dissertation_md"]),
+                file_name=f"{selected_id}_dissertation_report.docx",
+                mime=DOCX_MIME,
+                use_container_width=True,
+                key="sb_dl_diss_docx",
+            )
+        if bundle["executive_summary_md"]:
+            st.download_button(
+                "⚡ Скачать Краткий отчёт (.docx)",
+                data=build_docx_bytes_from_markdown(bundle["executive_summary_md"]),
+                file_name=f"{selected_id}_executive_summary.docx",
+                mime=DOCX_MIME,
+                use_container_width=True,
+                key="sb_dl_exec_docx",
+            )
+        if bundle["dissertation_md"] and bundle["executive_summary_md"]:
+            full_sections = [bundle["executive_summary_md"], bundle["dissertation_md"]] + [
+                m["content"] for m in bundle.get("kb_modules", []) if m.get("content")
+            ]
+            st.download_button(
+                "📚 Скачать Полное досье (.docx)",
+                data=build_docx_bytes_from_markdown_sections(full_sections),
+                file_name=f"{selected_id}_full_clinical_dossier.docx",
+                mime=DOCX_MIME,
+                use_container_width=True,
+                key="sb_dl_full_docx",
+            )
         if bundle["dissertation_md"]:
             st.download_button(
                 "📄 Скачать Диссертацию (.md)",
@@ -151,15 +186,6 @@ def render_sidebar(nosologies: list[dict[str, Any]]) -> tuple[str, dict[str, Any
                 mime="text/html",
                 use_container_width=True,
                 key="sb_dl_diss_html",
-            )
-        if bundle["executive_summary_md"]:
-            st.download_button(
-                "⚡ Скачать Краткий отчёт (.md)",
-                data=bundle["executive_summary_md"].encode("utf-8"),
-                file_name=f"{selected_id}_executive_summary.md",
-                mime="text/markdown",
-                use_container_width=True,
-                key="sb_dl_exec_md",
             )
 
     return selected_id, bundle
@@ -206,16 +232,24 @@ def render_tab_reports(bundle: dict[str, Any]) -> None:
             if chosen_sec == sec_titles[0]
             else next((s["content"] for s in sections if s["title"] == chosen_sec), md_text)
         )
-        dl_col1, dl_col2 = st.columns(2)
+        DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        dl_col1, dl_col2, dl_col3 = st.columns(3)
         dl_col1.download_button(
+            "📘 Скачать в формате Word (.docx)",
+            data=build_docx_bytes_from_markdown(active_md),
+            file_name=f"{nos_id}_dissertation.docx",
+            mime=DOCX_MIME,
+            key="t1_diss_docx_btn",
+        )
+        dl_col2.download_button(
             "⬇️ Скачать выбранный текст (.md)",
             data=active_md.encode("utf-8"),
             file_name=f"{nos_id}_dissertation.md",
             mime="text/markdown",
             key="t1_diss_md_btn",
         )
-        dl_col2.download_button(
-            "🖨️ Скачать версию для печати / PDF / Word (.html)",
+        dl_col3.download_button(
+            "🖨️ Скачать версию для печати / PDF (.html)",
             data=render_printable_html(f"{meta.get('title_ru', nos_id)} — Монография", active_md, meta).encode("utf-8"),
             file_name=f"{nos_id}_dissertation.html",
             mime="text/html",
@@ -231,16 +265,24 @@ def render_tab_reports(bundle: dict[str, Any]) -> None:
         if not md_text:
             st.warning("Файл `executive_summary.md` ещё не сгенерирован для выбранной нозологии.")
             return
-        dl_col1, dl_col2 = st.columns(2)
+        DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        dl_col1, dl_col2, dl_col3 = st.columns(3)
         dl_col1.download_button(
+            "📘 Скачать Краткий отчёт в Word (.docx)",
+            data=build_docx_bytes_from_markdown(md_text),
+            file_name=f"{nos_id}_executive_summary.docx",
+            mime=DOCX_MIME,
+            key="t1_exec_docx_btn",
+        )
+        dl_col2.download_button(
             "⬇️ Скачать Краткий клинический отчёт (.md)",
             data=md_text.encode("utf-8"),
             file_name=f"{nos_id}_executive_summary.md",
             mime="text/markdown",
             key="t1_exec_md_btn",
         )
-        dl_col2.download_button(
-            "🖨️ Скачать версию для печати / PDF / Word (.html)",
+        dl_col3.download_button(
+            "🖨️ Скачать версию для печати / PDF (.html)",
             data=render_printable_html(f"{meta.get('title_ru', nos_id)} — Краткий отчёт", md_text, meta).encode("utf-8"),
             file_name=f"{nos_id}_executive_summary.html",
             mime="text/html",
@@ -272,16 +314,24 @@ def render_tab_reports(bundle: dict[str, Any]) -> None:
             active_md = mod_obj["content"]
             fname = f"{nos_id}_{selected_mod_id}"
 
-        dl_col1, dl_col2 = st.columns(2)
+        DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        dl_col1, dl_col2, dl_col3 = st.columns(3)
         dl_col1.download_button(
+            "📘 Скачать модуль в Word (.docx)",
+            data=build_docx_bytes_from_markdown(active_md),
+            file_name=f"{fname}.docx",
+            mime=DOCX_MIME,
+            key="t1_kb_docx_btn",
+        )
+        dl_col2.download_button(
             "⬇️ Скачать модуль базы знаний (.md)",
             data=active_md.encode("utf-8"),
             file_name=f"{fname}.md",
             mime="text/markdown",
             key="t1_kb_md_btn",
         )
-        dl_col2.download_button(
-            "🖨️ Скачать модуль для печати / PDF / Word (.html)",
+        dl_col3.download_button(
+            "🖨️ Скачать модуль для печати / PDF (.html)",
             data=render_printable_html(f"{meta.get('title_ru', nos_id)} — База знаний", active_md, meta).encode("utf-8"),
             file_name=f"{fname}.html",
             mime="text/html",

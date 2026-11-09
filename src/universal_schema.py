@@ -693,6 +693,13 @@ def verify_universal_schema(nosology_id: str | None = None) -> int:
         print("[FAIL] CSV UTF-8-SIG BOM check failed.")
         return 1
 
+    from src.docx_exporter import build_docx_bytes_from_markdown
+
+    docx_bytes = build_docx_bytes_from_markdown(bundle["executive_summary_md"])
+    if not docx_bytes.startswith(b"PK") or len(docx_bytes) < 2048:
+        print("[FAIL] DOCX OpenXML export check failed.")
+        return 1
+
     df_art = query_articles_df(bundle["db_path"])
     df_clin = query_clinical_evidence_df(bundle["db_path"])
     df_mech = query_mechanisms_df(bundle["db_path"])
@@ -703,7 +710,7 @@ def verify_universal_schema(nosology_id: str | None = None) -> int:
         f"  - Stages: {len(stages)} | Subtypes/Loci: {len(subtypes)} | Risk/Protective Factors: {len(factors)}\n"
         f"  - Pathogenesis Phases: {len(phases)} | Treatment Modalities: {len(modalities)}\n"
         f"  - SQLite rows loaded: articles={len(df_art)}, clinical={len(df_clin)}, mechanisms={len(df_mech)}, trials={len(df_trials)}\n"
-        f"  - Exports verified: Printable HTML ({len(html_doc)} chars), UTF-8-SIG CSV ({len(csv_bytes)} bytes)"
+        f"  - Exports verified: DOCX ({len(docx_bytes)} bytes), Printable HTML ({len(html_doc)} chars), UTF-8-SIG CSV ({len(csv_bytes)} bytes)"
     )
     return 0
 

@@ -41,13 +41,13 @@ description: >-
 - **`extracted_basic_science`**: `pmid`, `doi`, `year`, `first_author`, `domain` (`genetics`, `epigenetics`, `cell_biology`, `signaling`, `biomechanics`, `immunology`), `genes_or_proteins`, `pathway`, `model_system` (`patient_tissue`, `primary_fibroblasts`, `gwas_cohort`, `scrna_seq`, `animal_model`), `sample_size`, `main_mechanism_finding`, `therapeutic_implication`.
 - **`extracted_epidemiology_risk`**: `pmid`, `doi`, `year`, `population_country`, `sample_size`, `prevalence_or_incidence`, `risk_factor`, `effect_size_or_hr` (с 95% ДИ), `notes`.
 
-### Фаза 3: Многорежимный синтез отчета (`Synthesizer`)
-На основе таблиц из Фазы 2 генерируются тексты в трех режимах (строго по правилам скилла `ru-medical-humanizer`):
-1. `reports/<nosology>/dissertation_report.md` — полный текст диссертационного / монографического уровня.
-2. `reports/<nosology>/executive_summary.md` — концентрированное аналитическое резюме.
-3. `reports/<nosology>/knowledge_base/` — модульная база знаний (карточки генов, методов лечения, матрица РКИ, клинические алгоритмы).
+### Фаза 3: Многорежимный синтез отчета (`Synthesizer`) и экспорт в формат MS Word (`.docx`)
+На основе таблиц из Фазы 2 генерируются тексты в трех режимах (строго по правилам скилла `ru-medical-humanizer`), которые автоматически компилируются как в `.md`, так и в профессионально сверстанные документы Microsoft Word (`.docx`) через `src/docx_exporter.py` и `src/verify_reports.py`:
+1. `reports/<nosology>/dissertation_report.md` и **`reports/<nosology>/dissertation_report.docx`** — полный текст диссертационного / монографического уровня с нумерованной библиографией.
+2. `reports/<nosology>/executive_summary.md` и **`reports/<nosology>/executive_summary.docx`** — концентрированное клиническое руководство.
+3. `reports/<nosology>/knowledge_base/` и **`reports/<nosology>/full_clinical_dossier.docx`** — модульная база знаний (`01..05_*.md`, `kb_index.json`) и единое сводное клиническое досье в формате `.docx` (включающее краткое руководство, диссертацию и все 5 модулей базы знаний с таблицами, гиперссылками и алгоритмами).
 
-Каждый численный тезис в отчете обязан иметь ссылку вида `[Автор, Год; PMID: XXXXXXXX]` или `[NCTXXXXXXXX]`, проверяемую по локальной БД.
+Каждый численный тезис в отчете обязан иметь ссылку вида `[Автор, Год; PMID: XXXXXXXX]` или `[NCTXXXXXXXX]`, проверяемую по локальной БД. В конце обязательно запускается `uv run src/verify_reports.py --nosology <nosology> --compile-bibliography --verify` (или `uv run src/docx_exporter.py --nosology <nosology>`), который верифицирует ссылки и формирует готовые файлы `.docx`.
 
 ### Фаза 4: Интерактивный навигатор (`app.py`)
 Веб-интерфейс (Streamlit), подключающийся к `data/<nosology>/literature.db` и папке `reports/<nosology>/`:

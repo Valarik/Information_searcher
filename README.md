@@ -46,11 +46,14 @@ uv run app.py --self-test
 ├── data/prom/
 │   ├── literature.db               # База SQLite по ПИОВ/ПРПО (2643 статьи, 1150 клин., 950 мех., 210 РКИ)
 │   └── extractions/                # 4 кластерных аналитических досье
-├── reports/prom/
-│   ├── dissertation_report.md      # Режим А: Диссертационная монография (4 главы + 97 источников [1]..[97])
-│   ├── executive_summary.md        # Режим Б: Краткий клинический отчёт
+├── reports/<nosology>/
+│   ├── dissertation_report.docx    # Режим А (MS Word .docx): Диссертационная монография с таблицами и библиографией
+│   ├── executive_summary.docx      # Режим Б (MS Word .docx): Краткое клиническое руководство
+│   ├── full_clinical_dossier.docx  # Полное сводное досье в MS Word (.docx): Краткий отчёт + Диссертация + 5 модулей БЗ
+│   ├── dissertation_report.md      # Режим А (Markdown): Диссертационная монография
+│   ├── executive_summary.md        # Режим Б (Markdown): Краткий клинический отчёт
 │   ├── prisma_stats.md             # Сводка отбора PRISMA
-│   ├── verification_audit.md       # Сертификат верификации ссылок и стиля
+│   ├── verification_audit.md       # Сертификат верификации ссылок, стиля и .docx экспортов
 │   └── knowledge_base/             # Режим В: 5 модулей базы знаний + kb_index.json
 └── archive/dupuytren/              # Изолированный архив предыдущей нозологии
 ```

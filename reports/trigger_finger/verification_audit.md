@@ -1,37 +1,21 @@
-# Аудит качества, анти-галлюцинаторной верификации и соответствия схеме (Verification Audit): `trigger_finger` (Болезнь Нотта и патология ПМФС)
+# Сертификат автоматической верификации отчётов (`src/verify_reports.py` — `trigger_finger`)
 
-**Дата верификации:** 2026-11-09
-**Нозология:** `trigger_finger` — Болезнь Нотта (стенозирующий лигаментит / щелкающий палец и контрактура проксимального межфалангового сустава ПМФС, МКБ-10: `M65.3` / `M20.0`, МКБ-11: `FB40.2`)
+- **Статус проверки:** `PASSED (Zero-Tolerance Gate)`
+- **Нозология:** Болезнь Нотта (стенозирующий лигаментит / щелкающий палец и контрактура ПМФС) (`M65.3`)
+- **База данных верификации:** `data/trigger_finger/literature.db` (`1024` включённых статей, `99` протоколов `ClinicalTrials.gov`)
+- **Число библиографических источников `[1]..[98]` в диссертационном отчёте:** `98` (`100%` подтверждены в SQLite)
+- **Нарушений словаря `ru-medical-humanizer`:** `0`
+- **Несуществующих / галлюцинированных `PMID / PMCID / DOI / NCT ID`:** `0`
+- **Сформированные файлы MS Word (`.docx`):** `dissertation_report.docx` (29.0 КБ), `executive_summary.docx` (10.4 КБ), `full_clinical_dossier.docx` (68.3 КБ)
 
----
+## Сводная таблица проверенных файлов отчёта (3 режима)
 
-## 1. Статистика корпуса и PRISMA-скрининга (`data/trigger_finger/literature.db`)
-
-* **Первичный сбор (`harvester.py --nosology trigger_finger`):** `1 957` сырых библиографических записей (`PubMed`: 971, `Europe PMC`: 984, `OpenAlex`: 2) + `99` протоколов клинических исследований `ClinicalTrials.gov`.
-* **Дедуплицированный корпус SQLite:** `1 682` уникальные статьи (`1 169` в открытом доступе).
-* **PRISMA-скрининг (`triage.py --nosology trigger_finger`):** `1 024` клинических и патоморфологических исследования включены в финальный синтез (`Tier 1`: 166, `Tier 2`: 144, `Tier 3`: 528, `Tier 4`: 186).
-* **Структурированная экстракция (`extract_trigger_finger.py`):** `1 024` записи в `extracted_mechanisms` и `1 024` записи в `extracted_clinical_evidence`.
-
----
-
-## 2. Результаты автоматизированных проверок
-
-1. **Анти-галлюцинаторный и стилистический контроль (`uv run src/verify_reports.py --nosology trigger_finger --compile-bibliography --verify`):**
-   * Проверено файлов: `7` Markdown-отчетов (`dissertation_report.md`, `executive_summary.md`, `01..05_*.md`) + `kb_index.json`.
-   * Скомпилированная библиография диссертационного отчета: **`98` пронумерованных источников (`[1]..[98]`)** с прямыми гиперссылками на PubMed/DOI.
-   * Неверифицированных или отсутствующих в локальной SQLite-базе идентификаторов `PMID` / `PMCID` / `NCT`: **`0` (100% верификация)**.
-   * Запрещенных ИИ-клише и канцеляризмов (`BANNED_AI_PHRASES` по стандарту `ru-medical-humanizer`): **`0`**.
-   * Обязательные контрольные термины (`"Нотта"`, `"проксимальн"`, `"ПМФС"`, `"6 мес"`, `"Плюсы"`, `"Минусы"`): **присутствуют во всех целевых отчетах**.
-   * Статус: **`ALL REPORT VERIFICATION CHECKS PASSED`**.
-
-2. **Универсальный контракт данных и экспорт (`uv run src/universal_schema.py --verify --nosology trigger_finger`):**
-   * Стадии классификации Green / Quinnell: `4` (`Grades I–IV`).
-   * Анатомические и патогенетические субтипы: `6` (`I–V лучи` + фенотип с контрактурой ПМФС).
-   * Факторы риска и протективные факторы: `5`.
-   * Фазы патогенеза: `3` (включая фазу артрогенно-сухожильной контрактуры ПМФС и 6-месячного послеоперационного цикла ремоделирования узелка Нотта).
-   * Модальности лечения с полным профилем `REQUIRED_MODALITY_KEYS`: `8`.
-   * Экспорт: печатный HTML (`20 437` символов) и таблица UTF-8-SIG CSV (`32 314` байт).
-   * Статус: **`[PASS] Universal schema verified for 'trigger_finger'`**.
-
-3. **Самотестирование веб-приложения (`uv run app.py --self-test`):**
-   * Все 4 вкладки и все 3 режима отчетов отрендерены без исключений (`0 exceptions`).
+| Файл отчёта | Объём (КБ) | Верифицировано уникальных `PMID` | Верифицировано `PMCID` | Верифицировано `NCT ID` | Штампы ИИ (`ru-medical-humanizer`) | Статус |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: |
+| `reports/trigger_finger/dissertation_report.md` | 74.2 | 98 | 31 | 11 | 0 | `OK` |
+| `reports/trigger_finger/executive_summary.md` | 17.9 | 39 | 0 | 4 | 0 | `OK` |
+| `reports/trigger_finger/knowledge_base/01_disease_overview_and_pathogenesis.md` | 16.7 | 21 | 0 | 1 | 0 | `OK` |
+| `reports/trigger_finger/knowledge_base/02_pip_joint_pain_and_contracture_6m_phenomenon.md` | 26.2 | 27 | 0 | 2 | 0 | `OK` |
+| `reports/trigger_finger/knowledge_base/03_conservative_and_injection_modalities.md` | 10.6 | 19 | 0 | 5 | 0 | `OK` |
+| `reports/trigger_finger/knowledge_base/04_surgical_release_and_fds_resection.md` | 10.7 | 23 | 0 | 2 | 0 | `OK` |
+| `reports/trigger_finger/knowledge_base/05_clinical_trials_and_rct_registry.md` | 14.1 | 23 | 0 | 14 | 0 | `OK` |

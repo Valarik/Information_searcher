@@ -316,6 +316,16 @@ def verify_all_reports(nosology_id: str = "prom") -> None:
     assert len(kb_data.get("modules", [])) == 5, "kb_index.json must index 5 modules"
     assert len(kb_data.get("modalities", [])) >= 8, "kb_index.json must include >= 8 treatment modalities"
 
+    # Automatically generate .docx formatted reports (dissertation_report.docx, executive_summary.docx, full_clinical_dossier.docx)
+    root_dir = Path(__file__).resolve().parent.parent
+    if str(root_dir) not in sys.path:
+        sys.path.insert(0, str(root_dir))
+    from src.docx_exporter import export_nosology_docx_files
+
+    docx_paths = export_nosology_docx_files(nosology_id, root_dir)
+    for docx_key, docx_file in docx_paths.items():
+        assert docx_file.exists() and docx_file.stat().st_size > 2048, f"Missing or empty .docx file: {docx_file}"
+
     # Write verification_audit.md
     audit_lines = [
         f"# Сертификат автоматической верификации отчётов (`src/verify_reports.py` — `{nosology_id}`)",
@@ -326,6 +336,7 @@ def verify_all_reports(nosology_id: str = "prom") -> None:
         f"- **Число библиографических источников `[1]..[{len(bib_items)}]` в диссертационном отчёте:** `{len(bib_items)}` (`100%` подтверждены в SQLite)",
         "- **Нарушений словаря `ru-medical-humanizer`:** `0`",
         "- **Несуществующих / галлюцинированных `PMID / PMCID / DOI / NCT ID`:** `0`",
+        f"- **Сформированные файлы MS Word (`.docx`):** `dissertation_report.docx` ({round(docx_paths['dissertation_docx'].stat().st_size / 1024, 1)} КБ), `executive_summary.docx` ({round(docx_paths['executive_docx'].stat().st_size / 1024, 1)} КБ), `full_clinical_dossier.docx` ({round(docx_paths['full_dossier_docx'].stat().st_size / 1024, 1)} КБ)",
         "",
         "## Сводная таблица проверенных файлов отчёта (3 режима)",
         "",
@@ -338,7 +349,7 @@ def verify_all_reports(nosology_id: str = "prom") -> None:
         )
     audit_path.write_text("\n".join(audit_lines) + "\n", encoding="utf-8")
 
-    print(f"[Verify Reports: {nosology_id}] Checked {len(report_files)} Markdown files + kb_index.json.")
+    print(f"[Verify Reports: {nosology_id}] Checked {len(report_files)} Markdown files + kb_index.json + 3 .docx files.")
     print(f"[Verify Reports: {nosology_id}] Dissertation bibliography entries: {len(bib_items)} [1]..[{len(bib_items)}]")
     print(f"[Verify Reports: {nosology_id}] ALL REPORT VERIFICATION CHECKS PASSED.")
 
