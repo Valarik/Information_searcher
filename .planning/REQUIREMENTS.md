@@ -1,69 +1,74 @@
-# Requirements: Information Searcher (Контрактура Дюпюитрена 2016–2026)
+# Requirements: Information Searcher — Milestone v2.0 (Engine & Skills Upgrade)
 
-**Defined:** 2026-11-04
-**Core Value:** Доказательный, верифицируемый по PMID/DOI синтез клинической и фундаментальной литературы за 10 лет без галлюцинаций, канцелярита и ИИ-штампов, опирающийся на структурированную базу извлеченных данных.
+**Defined:** 2026-11-13
+**Core Value:** Доказательный, верифицируемый по `PMID / DOI / NCT ID` синтез клинической и фундаментальной литературы без галлюцинаций, канцелярита и шаблонных «коробочных» ИИ-выводов, с полным учетом профиля хирургических осложнений и реальных клинических компромиссов.
 
-## v1 Requirements
+---
 
-### Сбор и PRISMA-скрининг (HARV)
+## Validated Baseline (Milestones 1–4 / v1.x)
 
-- [x] **HARV-01**: Универсальный сборщик (`src/harvester.py`), принимающий `configs/<nosology>.yaml` и выгружающий статьи за 2016–2026 гг. из PubMed, Europe PMC, OpenAlex и клинических исследований из ClinicalTrials.gov.
-- [x] **HARV-02**: Дедупликация по DOI / PMID / PMCID / заголовку и сохранение единого реестра в `data/<nosology>/literature.db`.
-- [x] **HARV-03**: Автоматическая стратификация статей по уровням доказательности (`Tier 1`: метаанализы/РКИ/гайдлайны; `Tier 2`: когорты/GWAS/scRNA-seq; `Tier 3`: серии/in vitro/обзоры; `Tier 4`: кейсы/письма) и разметка по 5 тематическим кластерам (`src/triage.py`).
-- [x] **HARV-04**: Автоматическая выгрузка открытых полнотекстовых XML из Europe PMC для работ `Tier 1–2` и генерация PRISMA-отчета по корпусу (`reports/dupuytren/prisma_stats.md`).
+- [x] **HARV-01..04**: Универсальный сборщик `src/harvester.py`, дедупликация в SQLite, PRISMA-триаж `src/triage.py` и загрузка полнотекстовых XML Europe PMC.
+- [x] **EXTR-01..04**: Кластерная табличная экстракция патогенеза (`extracted_mechanisms`) и клинической эффективности (`extracted_clinical_evidence`).
+- [x] **SYNT-01..03**: Синтез отчетов в 3 режимах (`dissertation`, `executive_summary`, `knowledge_base`) с анти-галлюцинаторным контролем `src/verify_reports.py`.
+- [x] **UI-01**: Мульти-нозологическое веб-приложение `app.py` (4 вкладки, автотест `--self-test`).
+- [x] **EXPORT-01**: Академическая компиляция отчетов и сводного клинического досье в формат MS Word (`.docx`) через `src/docx_exporter.py`.
 
-### Роевая структурированная экстракция (EXTR)
+---
 
-- [x] **EXTR-01**: Экстракция по кластеру «Этиология, эпидемиология и генетика» (GWAS-локусы, сигнальный путь Wnt, популяционная распространенность, диабет, алкоголь, курение, ручной труд и вибрация, диатез Дюпюитрена) в таблицу `extracted_mechanisms`.
-- [x] **EXTR-02**: Экстракция по кластеру «Молекулярный и клеточный патогенез» (биология миофибробластов, TGF-β1/Smad, механотрансдукция YAP/TAZ, иммунное микроокружение/TNF/макрофаги, ремоделирование коллагена III/I, данные scRNA-seq) в таблицу `extracted_mechanisms`.
-- [x] **EXTR-03**: Экстракция по кластеру «Консервативные и малоинвазивные методы» (игольная апоневротомия PNF, коллагеназа C. histolyticum CCH, анти-TNF адалимумаб, лучевая терапия, УВТ, ортезирование) в таблицу `extracted_clinical_evidence`.
-- [x] **EXTR-04**: Экстракция по кластеру «Хирургическое лечение, осложнения и отдаленные результаты» (ограниченная/селективная фасциэктомия, дермофасциэктомия, WALANT, липографтинг, кожная пластика, динамика рецидивов на 1–3–5–10 годах раздельно для ПФС и ПМФС) в таблицу `extracted_clinical_evidence`.
+## Milestone v2.0 Requirements
 
-### Генерация отчетов в 3 режимах с де-ИИзацией (SYNT)
+### 1. Сбор и структурированная экстракция частых осложнений лечения (`COMP`)
 
-- [x] **SYNT-01**: Написание полного отчета диссертационного уровня (`reports/dupuytren/dissertation_report.md`) со строгим соблюдением правил `ru-medical-humanizer`, сводными таблицами и верифицированными ссылками `[PMID: ...]`.
-- [x] **SYNT-02**: Генерация краткого аналитического содержания (`reports/dupuytren/executive_summary.md`) с ключевыми выводами за 10 лет и сравнительными матрицами.
-- [x] **SYNT-03**: Формирование модульной внутренней базы знаний (`reports/dupuytren/knowledge_base/`) по мишеням, факторам риска, методам лечения и ключевым РКИ.
+- [ ] **COMP-01**: Конфигурация `configs/<id>.yaml` и форма создания нозологии в `app.py` поддерживают флаг `surgical_focus: true/false` и блок целевых запросов `complications_queries` (`pubmed`, `europepmc`), а `src/harvester.py` выполняет отдельный проход выгрузки публикаций по интра- и послеоперационным осложнениям (либо автоматически генерирует подзапрос `Postoperative Complications / Intraoperative Complications / adverse effects` для хирургических нозологий).
+- [ ] **COMP-02**: Скрипт `src/triage.py` размечает публикации по безопасности и осложнениям тегом `complications_safety`, учитывает их в `prisma_stats.md` и включает релевантные работы по хирургическим осложнениям в очередь выгрузки полнотекстовых XML Europe PMC.
+- [ ] **COMP-03**: Схема `src/schema.py` и ядро `src/extractor_common.py` содержат таблицу `extracted_complications` (поля: `article_id`, `modality`, `complication_name`, `timing_category`, `clavien_dindo_grade`, `frequency_pct`, `frequency_num`, `reversibility`, `time_window`, `anatomical_substrate`, `prevention_and_management`, `sample_size`, `pmid`) и функции записи/чтения с безопасной миграцией (`CREATE TABLE IF NOT EXISTS`) для обратной совместимости с базами `v1.x`.
+- [ ] **COMP-04**: Универсальный адаптер `src/universal_schema.py` поддерживает в `kb_index.json` структурированный массив `frequent_complications` (с проверкой обязательных полей в режиме `v2.0` и мягким fallback-режимом для ранее собранных нозологий `v1.x`).
 
-### Веб-интерфейс и универсальный запуск (UI)
+### 2. Глубокая структурная и клиническая хуманизация (`HUM2`)
 
-- [x] **UI-01**: Веб-приложение (`app.py` на Streamlit) с переключателем трех вариантов отчета, интерактивной PRISMA-воронкой, фильтрацией всех статей базы, таблицами сравнения методов лечения и выбором нозологии из `configs/`.
+- [ ] **HUM2-01**: Скилл `.agent/skills/ru-medical-humanizer/SKILL.md` обновлен до `v2.0`: зафиксирован запрет на искусственную линейную маршрутизацию в выводах (*«это лечение для 1, это для 2, это для 3»*), описан стандарт подачи **сквозных конкурирующих методик** (подходящих почти ко всему спектру стадий, но различающихся практическими нюансами, рисками и требованиями к оснащению/опыту) и введены жесткие правила баланса связной прозы против маркированных списков.
+- [ ] **HUM2-02**: Скилл `.agent/skills/nosology-research-pipeline/SKILL.md` и контракт `kb_index.json` (`v2.0`) включают блок `clinical_decision_nuances` (`universal_workhorse_modalities`, `overlapping_indications_and_gray_zones`, `strict_niche_or_salvage_indications`) и обязательный раздел разбора частых осложнений для всех будущих нозологий.
+- [ ] **HUM2-03**: Верификатор `src/verify_reports.py` оснащен структурным анти-ИИ линтером `v2.0`: расширенный словарь речевых и логических штампов ИИ, автоматический подсчет доли буллитов с жирным зачином (`bold-lead bullet ratio`) в диссертационном отчете, блокировка механических «коробочных» выводов в финальной главе и проверка наличия анализа осложнений и перекрывающихся показаний для отчетов `v2.0`.
 
-## v2 Requirements
+### 3. Визуализация в `app.py`, экспорт `.docx` и автотестирование движка (`UI / EXPORT`)
 
-- **AUTO-01**: Автоматический мониторинг новых публикаций по расписанию (Living Systematic Review).
-- **EXPORT-01**: Прямая компиляция диссертационного отчета в ГОСТ-оформленный DOCX и PDF.
+- [ ] **UI-02**: Веб-интерфейс `app.py` отображает интерактивный профиль частых осложнений (`Clavien–Dindo`, частота по методикам, обратимость vs стойкий дефицит, тактика коррекции), таблицу `extracted_complications` в PRISMA-навигаторе с выгрузкой в `.csv` и блок клинических нюансов/перекрывающихся показаний (`clinical_decision_nuances`), не ломая рендеринг готовых нозологий `v1.x`.
+- [ ] **EXPORT-02**: Экспортер `src/docx_exporter.py` и набор автотестов (`tests/test_v2_engine.py` + `uv run app.py --self-test`) проверяют полный цикл работы движка `v2.0` (таблица осложнений, линтер де-ИИзации выводов, генерация `.docx` и обратная совместимость с существующими папками `prom`, `metroplasty_pregnancy`, `trigger_finger`).
+
+---
+
+## Future / Deferred Requirements
+
+- **AUTO-01**: Периодический мониторинг новых публикаций по расписанию (`Living Systematic Review`).
+- **RETRO-01**: Опциональная пересборка архивных/ранее созданных нозологий `v1.x` по стандарту `v2.0` (выполняется только по отдельному запросу пользователя).
 
 ## Out of Scope
 
 | Feature | Reason |
 |---------|--------|
-| Парсинг пиратских баз (Sci-Hub и др.) | Работа ведется строго через официальные API (NCBI, Europe PMC, OpenAlex, ClinicalTrials.gov) с соблюдением лицензий |
-| Обычный векторный чат без предварительной табличной экстракции | Не дает точной сводной статистики по частоте рецидивов и осложнений |
+| Автоматическая перезапись готовых отчетов `prom`, `metroplasty_pregnancy`, `trigger_finger` в рамках Milestone v2.0 | По решению пользователя обновляется только движок и скиллы для будущих нозологий |
+| Обход закрытых пейволлов | Используются исключительно официальные API (`PubMed`, `Europe PMC`, `OpenAlex`, `ClinicalTrials.gov`) |
 
-## Traceability
+---
+
+## Traceability (Milestone v2.0)
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| HARV-01 | Phase 1 | Complete |
-| HARV-02 | Phase 1 | Complete |
-| HARV-03 | Phase 1 | Complete |
-| HARV-04 | Phase 1 | Complete |
-| EXTR-01 | Phase 2 | Complete |
-| EXTR-02 | Phase 2 | Complete |
-| EXTR-03 | Phase 2 | Complete |
-| EXTR-04 | Phase 2 | Complete |
-| SYNT-01 | Phase 3 | Complete |
-| SYNT-02 | Phase 3 | Complete |
-| SYNT-03 | Phase 3 | Complete |
-| UI-01 | Phase 4 | Complete |
+| COMP-01 | Phase 17 | Pending |
+| COMP-02 | Phase 17 | Pending |
+| COMP-03 | Phase 17 | Pending |
+| COMP-04 | Phase 17 | Pending |
+| HUM2-01 | Phase 18 | Pending |
+| HUM2-02 | Phase 18 | Pending |
+| HUM2-03 | Phase 18 | Pending |
+| UI-02 | Phase 19 | Pending |
+| EXPORT-02 | Phase 19 | Pending |
 
 **Coverage:**
-
-- v1 requirements: 12 total
-- Mapped to phases: 12
-- Unmapped: 0
+- Milestone v2.0 requirements: `9` total
+- Mapped to phases: `9` (`100%`)
+- Unmapped: `0`
 
 ---
-*Requirements defined: 2026-11-04*
-*Last updated: 2026-11-04 after GSD initialization*
+*Last updated: 2026-11-13 — Milestone v2.0 requirements defined*
