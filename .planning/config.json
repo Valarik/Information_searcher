@@ -42,7 +42,6 @@
   "hooks": {
     "context_warnings": true
   },
-  "project_code": "INFO-SEARCH",
   "agent_skills": {
     "default": [
       "ru-medical-humanizer",

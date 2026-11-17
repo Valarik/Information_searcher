@@ -55,4 +55,4 @@ None.
 
 Last session: 2026-11-17T18:12:00Z
 Stopped at: Phase 17 context gathered
-Resume file: `.planning/phases/INFO-SEARCH-17-prisma/17-CONTEXT.md`
+Resume file: `.planning/phases/17-prisma/17-CONTEXT.md`
