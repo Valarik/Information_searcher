@@ -105,7 +105,23 @@ def parse_jats_xml(xml_path: str | Path | None) -> dict[str, Any]:
             continue
         if any(k in sec_title for k in ("method", "material", "patient", "study design", "cohort", "population")):
             methods_parts.append(sec_text[:4000])
-        elif any(k in sec_title for k in ("result", "finding", "outcome", "complication", "recurrence", "efficacy")):
+        elif any(
+            k in sec_title
+            for k in (
+                "result",
+                "finding",
+                "outcome",
+                "complication",
+                "recurrence",
+                "efficacy",
+                "adverse",
+                "safety",
+                "morbidity",
+                "side effect",
+                "sequela",
+                "harms",
+            )
+        ):
             results_parts.append(sec_text[:5000])
         elif any(k in sec_title for k in ("discussion", "conclusion")):
             discussion_parts.append(sec_text[:3000])
@@ -322,3 +338,431 @@ def extract_joint_outcomes(text: str) -> dict[str, str]:
         res["recurrence_rate_overall"] = " | ".join(rec_sents[:2])[:400]
 
     return res
+
+
+# ---------------------------------------------------------------------------
+# Phase 17 (COMP-03, D-04, D-07, D-08): Complications Extraction & Validation
+# ---------------------------------------------------------------------------
+
+VALID_CLAVIEN_DINDO: tuple[str, ...] = ("I", "II", "IIIa", "IIIb", "IV", "V")
+
+VALID_REVERSIBILITY: tuple[str, ...] = (
+    "transient_self_limiting",
+    "requires_conservative_therapy",
+    "requires_reoperation",
+    "permanent_deficit",
+)
+
+VALID_EVENT_CLASS: tuple[str, ...] = (
+    "true_complication",
+    "transient_postop_sequela",
+)
+
+CTCAE_TO_CLAVIEN_MAP: dict[str, str] = {
+    "1": "I",
+    "2": "II",
+    "3": "IIIa",
+    "4": "IV",
+    "5": "V",
+}
+
+RECURRENCE_EXCLUSION_PATTERNS: tuple[str, ...] = (
+    r"\btrue\s+recurrence\b",
+    r"\bdisease\s+recurrence\b",
+    r"\brelapse\b",
+    r"\bincomplete\s+(?:release|division|transection)\b",
+    r"\bpersistent\s+triggering\b",
+    r"истинн\w*\s+рецидив",
+    r"рецидив\s+заболеван",
+    r"неполн\w*\s+(?:релиз|рассечен)",
+)
+
+DEFAULT_SEQUELA_TIME_WINDOW = "Фаза послеоперационного ремоделирования (срок требует уточнения)"
+
+
+def table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
+    """Return True if a SQLite table exists (parameterized sqlite_master lookup, T-17-01/T-17-02)."""
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+        (table_name,),
+    ).fetchone()
+    return row is not None
+
+
+def is_excluded_recurrence_event(complication_name: str) -> bool:
+    """Return True if event is disease recurrence or technical incomplete release (D-08)."""
+    text = (complication_name or "").strip()
+    if not text:
+        return False
+    return any(re.search(pat, text, flags=re.IGNORECASE) for pat in RECURRENCE_EXCLUSION_PATTERNS)
+
+
+def normalize_clavien_dindo(
+    grade: str | None = None,
+    ctcae_grade: str | int | None = None,
+    requires_reoperation: bool = False,
+) -> tuple[str, str | None]:
+    """Normalize Clavien-Dindo (I..V) and/or CTCAE Grade 1-5 to canonical (clavien_dindo_grade, ctcae_grade) (D-07)."""
+    normalized_ctcae: str | None = None
+    ctcae_mapped: str | None = None
+
+    if ctcae_grade is not None and str(ctcae_grade).strip():
+        ctcae_raw = str(ctcae_grade).strip()
+        m_ctcae = re.fullmatch(
+            r"(?:(?:nci[\s\-–—]*)?ctcae(?:\s+v?\d+(?:\.\d+)?)?\s*)?(?:grade\s*|g)?\s*([1-5])",
+            ctcae_raw,
+            flags=re.IGNORECASE,
+        )
+        if not m_ctcae:
+            raise ValueError(f"Invalid CTCAE grade: {ctcae_grade!r}")
+        digit = m_ctcae.group(1)
+        normalized_ctcae = f"Grade {digit}"
+        ctcae_mapped = CTCAE_TO_CLAVIEN_MAP[digit]
+
+    grade_str = (grade or "").strip()
+    if grade_str:
+        if "ctcae" in grade_str.lower():
+            m_inline_ctcae = re.search(
+                r"\b(?:nci[\s\-–—]*)?ctcae(?:\s+v?\d+(?:\.\d+)?)?\s*(?:grade\s*|g)?\s*[:\-–—]?\s*([1-5])\b",
+                grade_str,
+                flags=re.IGNORECASE,
+            )
+            if not m_inline_ctcae:
+                raise ValueError(f"Invalid CTCAE grade in Clavien-Dindo field: {grade!r}")
+            digit = m_inline_ctcae.group(1)
+            if normalized_ctcae is None:
+                normalized_ctcae = f"Grade {digit}"
+            return CTCAE_TO_CLAVIEN_MAP[digit], normalized_ctcae
+
+        cleaned = re.sub(
+            r"^(?:clavien[\s\-–—]+dindo|clavien|cd)\s*(?:classification\s*)?[:\-–—]?\s*",
+            "",
+            grade_str,
+            flags=re.IGNORECASE,
+        )
+        cleaned = re.sub(r"^(?:grade|class|type)\s*[:\-–—]?\s*", "", cleaned, flags=re.IGNORECASE).strip()
+        compact = re.sub(r"[\s\-–—]+", "", cleaned).upper()
+
+        mapping = {
+            "I": "I",
+            "II": "II",
+            "III": "IIIb" if requires_reoperation else "IIIa",
+            "IIIA": "IIIa",
+            "IIIB": "IIIb",
+            "IV": "IV",
+            "IVA": "IV",
+            "IVB": "IV",
+            "V": "V",
+        }
+        if compact not in mapping:
+            raise ValueError(f"Invalid Clavien-Dindo grade: {grade!r}")
+        resolved = mapping[compact]
+        if resolved not in VALID_CLAVIEN_DINDO:
+            raise ValueError(f"Invalid Clavien-Dindo grade: {grade!r}")
+        return resolved, normalized_ctcae
+
+    if ctcae_mapped is not None:
+        return ctcae_mapped, normalized_ctcae
+
+    raise ValueError("Either Clavien-Dindo grade or CTCAE grade (1-5) must be provided")
+
+
+def extract_complication_frequency(text: str) -> tuple[str | None, float | None, int | None]:
+    """Parse '14/76 (18.4%)', '18.4% (14/76)', '15-32%', or '3.2%' while ignoring '95% CI'."""
+    if not text:
+        return None, None, None
+
+    # (a) n/N (X.Y%)
+    m = re.search(
+        r"\b(\d{1,5})\s*/\s*(\d{1,6})\s*\(\s*(\d{1,2}(?:[.,]\d+)?|100(?:[.,]0+)?)\s*%\s*\)",
+        text,
+    )
+    if m:
+        num, denom = int(m.group(1)), int(m.group(2))
+        pct = float(m.group(3).replace(",", "."))
+        if denom > 0 and num <= denom:
+            return f"{pct:g}% ({num}/{denom})", pct, denom
+
+    # (b) X.Y% (n/N)
+    m = re.search(
+        r"\b(\d{1,2}(?:[.,]\d+)?|100(?:[.,]0+)?)\s*%\s*\(\s*(\d{1,5})\s*/\s*(\d{1,6})\s*\)",
+        text,
+    )
+    if m:
+        pct = float(m.group(1).replace(",", "."))
+        num, denom = int(m.group(2)), int(m.group(3))
+        if denom > 0 and num <= denom:
+            return f"{pct:g}% ({num}/{denom})", pct, denom
+
+    # Strip explicit CI clauses before scanning standalone ranges / percentages so '95% CI 10-28%' is ignored
+    cleaned = re.sub(
+        r"\(\s*(?:90|95|99)\s*%\s*(?:CI|ДИ|confidence\s+interval)[^)]*\)",
+        " ",
+        text,
+        flags=re.IGNORECASE,
+    )
+    cleaned = re.sub(
+        r"\b(?:90|95|99)\s*%\s*(?:CI|ДИ|confidence\s+interval)\s*[:=]?\s*"
+        r"\d+(?:[.,]\d+)?\s*(?:–|-|—|to)\s*\d+(?:[.,]\d+)?\s*%?",
+        " ",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+
+    # (c) Range X–Y% / X-Y% / X to Y%
+    m = re.search(
+        r"\b(\d{1,2}(?:[.,]\d+)?|100(?:[.,]0+)?)\s*(?:–|-|—|to)\s*"
+        r"(\d{1,2}(?:[.,]\d+)?|100(?:[.,]0+)?)\s*%(?!\s*(?:CI|ДИ|confidence))",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    if m:
+        lo = float(m.group(1).replace(",", "."))
+        hi = float(m.group(2).replace(",", "."))
+        if lo <= hi <= 100.0:
+            mid = round((lo + hi) / 2.0, 2)
+            return f"{lo:g}–{hi:g}%", mid, None
+
+    # (d) Single X.Y% (ignoring 95% CI)
+    m = re.search(
+        r"\b(\d{1,2}(?:[.,]\d+)?|100(?:[.,]0+)?)\s*%(?!\s*(?:CI|ДИ|confidence))",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    if m:
+        pct = float(m.group(1).replace(",", "."))
+        return f"{pct:g}%", pct, None
+
+    return None, None, None
+
+
+def extract_clavien_dindo_grade(text: str) -> tuple[str | None, str | None]:
+    """Extract (clavien_dindo_grade, ctcae_grade) mentions from text and normalize via normalize_clavien_dindo."""
+    if not text:
+        return None, None
+
+    cd_raw: str | None = None
+    ctcae_raw: str | None = None
+
+    m_cd = re.search(
+        r"\bclavien[\s\-–—]+dindo\s*(?:classification\s*)?(?:grade|class|type)?\s*[:\-–—]?\s*"
+        r"(III[ab]|IV[ab]|III|II|IV|I|V)\b",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if not m_cd:
+        m_cd = re.search(
+            r"\b(?:grade|class)\s+(III[ab]|IV[ab]|III|II|IV|I|V)\b[^.]{0,40}\bclavien[\s\-–—]+dindo\b",
+            text,
+            flags=re.IGNORECASE,
+        )
+    if m_cd:
+        cd_raw = m_cd.group(1)
+
+    m_ctcae = re.search(
+        r"\b(?:nci[\s\-–—]*)?ctcae(?:\s+v?\d+(?:\.\d+)?)?\s*(?:grade|g)?\s*[:\-–—]?\s*([1-5])\b",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if not m_ctcae:
+        m_ctcae = re.search(
+            r"\bgrade\s+([1-5])\b[^.]{0,30}\bctcae\b",
+            text,
+            flags=re.IGNORECASE,
+        )
+    if m_ctcae:
+        ctcae_raw = m_ctcae.group(1)
+
+    if cd_raw is None and ctcae_raw is None:
+        return None, None
+
+    requires_reop = bool(re.search(r"\b(?:reoperat\w*|revision\s+surg\w*|general\s+anesthe\w*)\b", text, re.IGNORECASE))
+    return normalize_clavien_dindo(cd_raw, ctcae_raw, requires_reoperation=requires_reop)
+
+
+def extract_resolution_time_window(text: str) -> str | None:
+    """Extract clinical resolution/remodeling time window in English or Russian, or None."""
+    if not text:
+        return None
+
+    prefixed_patterns = (
+        r"\b(?:within|over|during|after|by|for|up\s+to)\s+"
+        r"\d+(?:\.\d+)?(?:\s*(?:–|-|—|to)\s*\d+(?:\.\d+)?)?\s*"
+        r"(?:days?|weeks?|wks?|months?|mos?|years?|yrs?)\b",
+        r"(?<!\w)(?:в\s+течение|через|до|на\s+протяжении|за)\s+"
+        r"\d+(?:[.,]\d+)?(?:\s*(?:–|-|—|до)\s*\d+(?:[.,]\d+)?)?\s*"
+        r"(?:дн(?:я|ей)|суток|сут\.?|недел[ьию]|нед\.?|месяц(?:а|ев)?|мес\.?|год(?:а)?|лет)(?!\w)",
+    )
+    for pat in prefixed_patterns:
+        m = re.search(pat, text, flags=re.IGNORECASE)
+        if m:
+            return " ".join(m.group(0).split()).strip()
+
+    standalone_patterns = (
+        r"\b\d+(?:\.\d+)?(?:\s*(?:–|-|—|to)\s*\d+(?:\.\d+)?)?\s*"
+        r"(?:days?|weeks?|wks?|months?|mos?|years?|yrs?)\b",
+        r"(?<!\w)\d+(?:[.,]\d+)?(?:\s*(?:–|-|—|до)\s*\d+(?:[.,]\d+)?)?\s*"
+        r"(?:дн(?:я|ей)|суток|сут\.?|недел[ьию]|нед\.?|месяц(?:а|ев)?|мес\.?|год(?:а)?|лет)(?!\w)",
+    )
+    for pat in standalone_patterns:
+        m = re.search(pat, text, flags=re.IGNORECASE)
+        if m:
+            return " ".join(m.group(0).split()).strip()
+
+    return None
+
+
+def insert_extracted_complication(
+    conn: sqlite3.Connection,
+    record: dict[str, Any],
+    *,
+    skip_recurrence: bool = False,
+    commit: bool = True,
+) -> int | None:
+    """Validate and insert one complication row into extracted_complications (COMP-03, D-04, D-07, D-08, T-17-01)."""
+    modality = str(record.get("modality") or "").strip()
+    complication_name = str(record.get("complication_name") or "").strip()
+    if not modality:
+        raise ValueError("Field 'modality' must be a non-empty string")
+    if not complication_name:
+        raise ValueError("Field 'complication_name' must be a non-empty string")
+
+    if is_excluded_recurrence_event(complication_name):
+        if skip_recurrence:
+            return None
+        raise ValueError(
+            f"Excluded disease recurrence / incomplete release event (D-08): {complication_name!r}"
+        )
+
+    raw_event_class = record.get("event_class")
+    event_class = "true_complication" if raw_event_class is None else str(raw_event_class).strip()
+    if event_class not in VALID_EVENT_CLASS:
+        raise ValueError(f"Invalid event_class: {event_class!r}. Allowed: {VALID_EVENT_CLASS}")
+
+    reversibility = str(record.get("reversibility") or "").strip()
+    if reversibility not in VALID_REVERSIBILITY:
+        raise ValueError(f"Invalid reversibility: {reversibility!r}. Allowed: {VALID_REVERSIBILITY}")
+
+    clavien_grade, ctcae_grade = normalize_clavien_dindo(
+        record.get("clavien_dindo_grade"),
+        record.get("ctcae_grade"),
+        requires_reoperation=(reversibility == "requires_reoperation"),
+    )
+
+    time_window_raw = str(record.get("time_window") or "").strip()
+    if event_class == "transient_postop_sequela":
+        if not time_window_raw:
+            search_blob = " ".join(
+                str(record.get(k) or "")
+                for k in ("complication_name", "timing_category", "prevention_and_management")
+            )
+            time_window_raw = extract_resolution_time_window(search_blob) or DEFAULT_SEQUELA_TIME_WINDOW
+        time_window: str | None = time_window_raw
+    else:
+        time_window = time_window_raw or None
+
+    raw_tier = record.get("evidence_tier")
+    evidence_tier = int(raw_tier) if raw_tier is not None and str(raw_tier).strip() != "" else None
+
+    raw_sample_size = record.get("sample_size")
+    sample_size = int(raw_sample_size) if raw_sample_size is not None and str(raw_sample_size).strip() != "" else None
+
+    raw_freq_num = record.get("frequency_num")
+    frequency_num = float(raw_freq_num) if raw_freq_num is not None and str(raw_freq_num).strip() != "" else None
+
+    is_rare_casuistry = (
+        1
+        if (
+            bool(record.get("is_rare_casuistry"))
+            or evidence_tier == 4
+            or (sample_size is not None and sample_size < 20)
+        )
+        else 0
+    )
+
+    if (
+        is_rare_casuistry == 1
+        and (sample_size is None or sample_size < 20)
+        and frequency_num is not None
+        and frequency_num >= 50.0
+    ):
+        frequency_num = None
+
+    cur = conn.cursor()
+    cur.execute(
+        """
+        INSERT INTO extracted_complications (
+            article_id,
+            pmid,
+            doi,
+            first_author_year,
+            evidence_tier,
+            modality,
+            complication_name,
+            event_class,
+            timing_category,
+            clavien_dindo_grade,
+            ctcae_grade,
+            frequency_pct,
+            frequency_num,
+            reversibility,
+            time_window,
+            anatomical_substrate,
+            prevention_and_management,
+            sample_size,
+            is_rare_casuistry
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            record.get("article_id"),
+            record.get("pmid"),
+            record.get("doi"),
+            record.get("first_author_year"),
+            evidence_tier,
+            modality,
+            complication_name,
+            event_class,
+            record.get("timing_category"),
+            clavien_grade,
+            ctcae_grade,
+            record.get("frequency_pct"),
+            frequency_num,
+            reversibility,
+            time_window,
+            record.get("anatomical_substrate"),
+            record.get("prevention_and_management"),
+            sample_size,
+            is_rare_casuistry,
+        ),
+    )
+    if commit:
+        conn.commit()
+    return int(cur.lastrowid)
+
+
+def fetch_extracted_complications(
+    conn: sqlite3.Connection,
+    *,
+    modality: str | None = None,
+    include_casuistry: bool = True,
+) -> list[dict[str, Any]]:
+    """Fetch rows from extracted_complications safely (returns [] if table absent, T-17-01/T-17-02)."""
+    if not table_exists(conn, "extracted_complications"):
+        return []
+
+    clauses: list[str] = []
+    params: list[Any] = []
+    if modality is not None:
+        clauses.append("modality = ?")
+        params.append(modality)
+    if not include_casuistry:
+        clauses.append("COALESCE(is_rare_casuistry, 0) = 0")
+
+    where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    sql = (
+        f"SELECT * FROM extracted_complications {where_sql} "
+        "ORDER BY modality ASC, COALESCE(frequency_num, -1.0) DESC, id ASC"
+    )
+    cur = conn.execute(sql, tuple(params))
+    columns = [desc[0] for desc in cur.description]
+    return [dict(zip(columns, row)) for row in cur.fetchall()]

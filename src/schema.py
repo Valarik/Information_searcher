@@ -105,6 +105,34 @@ def init_db(db_path: str | Path) -> sqlite3.Connection:
             mechanism_summary TEXT,
             therapeutic_implication TEXT
         );
+
+        CREATE TABLE IF NOT EXISTS extracted_complications (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            article_id INTEGER REFERENCES articles(id),
+            pmid TEXT,
+            doi TEXT,
+            first_author_year TEXT,
+            evidence_tier INTEGER,
+            modality TEXT NOT NULL,
+            complication_name TEXT NOT NULL,
+            event_class TEXT NOT NULL DEFAULT 'true_complication',
+            timing_category TEXT,
+            clavien_dindo_grade TEXT NOT NULL,
+            ctcae_grade TEXT,
+            frequency_pct TEXT,
+            frequency_num REAL,
+            reversibility TEXT NOT NULL,
+            time_window TEXT,
+            anatomical_substrate TEXT,
+            prevention_and_management TEXT,
+            sample_size INTEGER,
+            is_rare_casuistry INTEGER DEFAULT 0
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_ext_comp_article ON extracted_complications(article_id);
+        CREATE INDEX IF NOT EXISTS idx_ext_comp_modality ON extracted_complications(modality);
+        CREATE INDEX IF NOT EXISTS idx_ext_comp_grade ON extracted_complications(clavien_dindo_grade);
+        CREATE INDEX IF NOT EXISTS idx_ext_comp_class ON extracted_complications(event_class);
         """
     )
     conn.commit()
