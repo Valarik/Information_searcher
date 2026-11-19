@@ -134,7 +134,7 @@ Plans:
 
 > **Scope constraint:** В рамках Milestone `v2.0` обновляются исключительно код движка (`src/`), универсальная схема данных, автотесты, веб-интерфейс `app.py` и агентские скиллы (`.agent/skills/`) для всех будущих нозологий с сохранением `100%` обратной совместимости с уже собранными папками `v1.x` (`prom`, `metroplasty_pregnancy`, `trigger_finger`).
 
-- [ ] **Phase 17: Сбор, PRISMA-триаж и реляционная схема частых осложнений лечения** — поддержка `surgical_focus` и `complications_queries` в `harvester.py`, тег `complications_safety` в `triage.py`, таблица SQLite `extracted_complications` и секция `frequent_complications` в `universal_schema.py`.
+- [x] **Phase 17: Сбор, PRISMA-триаж и реляционная схема частых осложнений лечения** — поддержка `surgical_focus` и `complications_queries` в `harvester.py`, тег `complications_safety` в `triage.py`, таблица SQLite `extracted_complications` и секция `frequent_complications` в `universal_schema.py`. (completed 2026-11-19)
 - [ ] **Phase 18: Хуманизация `v2.0` — нелинейная логика клинического выбора и структурный анти-ИИ линтер** — обновление скиллов `ru-medical-humanizer` и `nosology-research-pipeline`, модель сквозных методик и клинических компромиссов (`clinical_decision_nuances`), структурный линтер в `verify_reports.py`.
 - [ ] **Phase 19: Визуализация осложнений и клинических нюансов в `app.py`, экспорт `.docx` и автотесты `v2.0`** — графики `Clavien–Dindo` и витрина перекрывающихся показаний в `app.py`, поддержка таблиц осложнений в `docx_exporter.py` и комплект автотестов `tests/test_v2_engine.py`.
 
@@ -161,7 +161,7 @@ Plans:
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
-- [ ] 17-03: Модульные, интеграционные и read-only `v1.x` регрессионные автотесты Фазы 17 (`tests/test_phase17_complications.py`)
+- [x] 17-03: Модульные, интеграционные и read-only `v1.x` регрессионные автотесты Фазы 17 (`tests/test_phase17_complications.py`)
 
 ### Phase 18: Хуманизация v2.0 — нелинейная логика клинического выбора и структурный анти-ИИ линтер
 
