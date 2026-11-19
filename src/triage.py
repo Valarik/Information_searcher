@@ -125,6 +125,155 @@ RARE_COMPLICATION_TERMS = (
     "compartment syndrome",
 )
 
+UNIVERSAL_SURGICAL_COMPLICATION_TERMS = (
+    "postoperative complication",
+    "intraoperative complication",
+    "surgical complication",
+    "iatrogenic",
+    "clavien-dindo",
+    "clavien–dindo",
+    "surgical site infection",
+    "wound infection",
+    "wound dehiscence",
+    "hematoma",
+    "seroma",
+    "nerve injury",
+    "neuropraxia",
+    "paresthesia",
+    "numbness",
+    "bowstringing",
+    "tendon rupture",
+    "pulley rupture",
+    "scar tenderness",
+    "scar pain",
+    "complex regional pain",
+    "crps",
+    "algodystrophy",
+    "postoperative stiffness",
+    "extension lag",
+    "extension deficit",
+    "vascular injury",
+    "ischemia",
+    "necrosis",
+    "reoperation",
+    "revision surgery",
+)
+
+UNIVERSAL_CONSERVATIVE_ADVERSE_TERMS = (
+    "adverse event",
+    "adverse effect",
+    "side effect",
+    "drug-related",
+    "treatment-related adverse",
+    "treatment-emergent",
+    "ctcae",
+    "toxicity",
+    "skin atrophy",
+    "hypopigmentation",
+    "fat necrosis",
+    "flare reaction",
+    "steroid flare",
+    "hyperglycemia",
+    "anaphylaxis",
+)
+
+BASIC_SCIENCE_MARKERS = (
+    "in vitro",
+    "ex vivo",
+    "cell line",
+    "animal model",
+    "mouse",
+    "mice",
+    "rat ",
+    "cadaver",
+    "scrna-seq",
+    "single-cell",
+    "rna-seq",
+    "gwas",
+)
+
+CLINICAL_SAMPLE_SIZE_PATTERNS = (
+    r"\b(\d[\d,]{0,6})\s+(?:consecutive\s+)?(?:patients?|subjects?|participants?|individuals?|cases?|wom[ae]n|pregnanc(?:y|ies)|deliver(?:y|ies)|mothers?|adults?|child(?:ren)?)\b",
+    r"\b(?:n|N)\s*=\s*(\d[\d,]{0,6})\b",
+    r"\b(?:cohort|series|total|study|review)\s+of\s+(\d[\d,]{0,6})\b",
+    r"\b(\d[\d,]{0,6})\s+(?:consecutive\s+)?(?:hands?|digits?|fingers?|thumbs?|rays?|joints?|pulleys?|tendons?|trigger\s+fingers?|trigger\s+digits?|trigger\s+thumbs?|wrists?|elbows?|shoulders?|knees?|hips?|ankles?|procedures?|operations?|releases?|interventions?)\b",
+)
+
+
+def _parse_sources_list(sources: list[str] | str | None) -> list[str]:
+    if not sources:
+        return []
+    if isinstance(sources, str):
+        try:
+            parsed = json.loads(sources)
+            if isinstance(parsed, list):
+                return [str(s) for s in parsed if s is not None]
+            if parsed is not None:
+                return [str(parsed)]
+        except Exception:
+            return [sources]
+        return []
+    if isinstance(sources, (list, tuple, set)):
+        return [str(s) for s in sources if s is not None]
+    return [str(sources)]
+
+
+def should_tag_complications_safety(
+    title: str,
+    abstract: str | None,
+    sources: list[str] | str | None = None,
+    triage_rules: dict[str, Any] | None = None,
+) -> bool:
+    """Return True when an article triggers any of the 3 D-05 complications_safety signals."""
+    src_list = _parse_sources_list(sources)
+    if any(
+        s in ("PubMed:Complications", "EuropePMC:Complications") or s.endswith(":Complications")
+        for s in src_list
+    ):
+        return True
+
+    combined = f"{title or ''}\n{abstract or ''}".lower()
+    if any(
+        term in combined
+        for term in (
+            *UNIVERSAL_SURGICAL_COMPLICATION_TERMS,
+            *UNIVERSAL_CONSERVATIVE_ADVERSE_TERMS,
+            *RARE_COMPLICATION_TERMS,
+        )
+    ):
+        return True
+
+    if triage_rules:
+        yaml_terms = list(triage_rules.get("complication_terms") or []) + list(
+            triage_rules.get("rare_complication_terms") or []
+        )
+        if any(str(t).lower() in combined for t in yaml_terms if t):
+            return True
+
+    return False
+
+
+def _extract_clinical_sample_size(text: str) -> int | None:
+    """Extract maximum clinical patient/joint/digit sample size while filtering calendar years."""
+    if not text:
+        return None
+    max_n: int | None = None
+    for pat in CLINICAL_SAMPLE_SIZE_PATTERNS:
+        for m in re.finditer(pat, text, flags=re.IGNORECASE):
+            val_str = m.group(1).replace(",", "")
+            if val_str.isdigit():
+                val = int(val_str)
+                if 1 <= val <= 1_000_000 and not (1990 <= val <= 2030):
+                    if max_n is None or val > max_n:
+                        max_n = val
+    return max_n
+
+
+def _is_basic_science_study(text: str) -> bool:
+    """Return True for in vitro / ex vivo / animal / cadaver / omics studies."""
+    low = (text or "").lower()
+    return any(marker in low for marker in BASIC_SCIENCE_MARKERS)
+
 
 def get_uv_bin() -> str:
     uv_in_path = shutil.which("uv")
@@ -150,6 +299,7 @@ def classify_prisma_status(
     start_year: int,
     end_year: int,
     triage_rules: dict[str, Any] | None = None,
+    sources: list[str] | str | None = None,
 ) -> str:
     """Apply nosology-agnostic PRISMA inclusion/exclusion filters from `triage_rules`."""
     if pub_year is not None and (pub_year < start_year or pub_year > end_year):
@@ -168,6 +318,10 @@ def classify_prisma_status(
         ctx_terms = [t.lower() for t in triage_rules.get("context_terms", [])]
         has_core = any(t in combined for t in core_terms) if core_terms else True
         has_ctx = any(t in combined for t in ctx_terms) if ctx_terms else True
+        if not has_ctx and ctx_terms:
+            has_ctx = should_tag_complications_safety(
+                title, abstract, sources=sources, triage_rules=triage_rules
+            )
         if not has_core or not has_ctx:
             return "excluded_offtopic"
     else:
@@ -196,15 +350,32 @@ def classify_evidence_tier(
     abstract: str | None,
     pub_types: list[str],
     rare_complication_terms: tuple[str, ...] | list[str] = RARE_COMPLICATION_TERMS,
+    complication_terms: tuple[str, ...] | list[str] = (),
 ) -> tuple[int, list[str]]:
-    """Classify included articles into Tier 1-4 per D-05 and D-06."""
+    """Classify included articles into Tier 1-4 per D-04, D-05 and D-06."""
     t_lower = title.lower()
     abs_lower = (abstract or "").lower()
     combined = f"{t_lower}\n{abs_lower}"
     pt_lower = [p.lower() for p in pub_types]
     updated_types = list(pub_types)
 
-    # Check Tier 4 first for obvious letters/errata/comments/case reports (D-05)
+    def _append_tier4_comp_markers() -> None:
+        has_rare = any(str(rc).lower() in combined for rc in (rare_complication_terms or ()) if rc)
+        has_any_comp = has_rare or any(
+            str(term).lower() in combined
+            for term in (
+                *(complication_terms or ()),
+                *UNIVERSAL_SURGICAL_COMPLICATION_TERMS,
+                *UNIVERSAL_CONSERVATIVE_ADVERSE_TERMS,
+            )
+            if term
+        )
+        if has_rare and "Rare Complication Case [D-05]" not in updated_types:
+            updated_types.append("Rare Complication Case [D-05]")
+        if has_any_comp and "rare_catastrophic_case" not in updated_types:
+            updated_types.append("rare_catastrophic_case")
+
+    # Check Tier 4 first for obvious letters/errata/comments/case reports (D-04, D-05)
     tier4_pt_markers = (
         "case reports",
         "letter",
@@ -220,9 +391,7 @@ def classify_evidence_tier(
         "retracted publication",
     )
     if any(m in pt_lower for m in tier4_pt_markers):
-        if any(rc.lower() in combined for rc in rare_complication_terms):
-            if "Rare Complication Case [D-05]" not in updated_types:
-                updated_types.append("Rare Complication Case [D-05]")
+        _append_tier4_comp_markers()
         return 4, updated_types
 
     tier4_title_markers = (
@@ -238,9 +407,7 @@ def classify_evidence_tier(
         "author response",
     )
     if any(m in t_lower for m in tier4_title_markers):
-        if any(rc.lower() in combined for rc in rare_complication_terms):
-            if "Rare Complication Case [D-05]" not in updated_types:
-                updated_types.append("Rare Complication Case [D-05]")
+        _append_tier4_comp_markers()
         return 4, updated_types
 
     # Tier 1: Meta-Analysis, Systematic Review, RCT, Clinical Practice Guideline
@@ -280,6 +447,12 @@ def classify_evidence_tier(
 
     # If abstract is completely missing and not Tier 1, place in Tier 4 (D-05)
     if not abstract or len(abstract.strip()) < 60:
+        return 4, updated_types
+
+    # D-04: Two-contour separation — small clinical series (1 <= N < 20) go to Tier 4 casuistry
+    eff_n = _extract_clinical_sample_size(combined)
+    if eff_n is not None and 1 <= eff_n < 20 and not _is_basic_science_study(combined):
+        _append_tier4_comp_markers()
         return 4, updated_types
 
     # Tier 2: Prospective/Comparative cohorts, registries, GWAS, scRNA-seq/multi-omics, >=3yr follow-up
@@ -326,13 +499,23 @@ def classify_evidence_tier(
     return 3, updated_types
 
 
-def assign_clusters(title: str, abstract: str | None, clusters_cfg: dict[str, Any]) -> list[str]:
+def assign_clusters(
+    title: str,
+    abstract: str | None,
+    clusters_cfg: dict[str, Any],
+    *,
+    sources: list[str] | str | None = None,
+    triage_rules: dict[str, Any] | None = None,
+) -> list[str]:
     combined = f"{title}\n{abstract or ''}".lower()
     matched: list[str] = []
-    for c_key, c_info in clusters_cfg.items():
+    for c_key, c_info in (clusters_cfg or {}).items():
         keywords = c_info.get("keywords") or []
         if any(kw.lower() in combined for kw in keywords):
             matched.append(c_key)
+    if should_tag_complications_safety(title, abstract, sources=sources, triage_rules=triage_rules):
+        if "complications_safety" not in matched:
+            matched.append("complications_safety")
     return matched
 
 
@@ -345,46 +528,70 @@ def load_epmc_module():
     return mod
 
 
+def _has_epmc_source(raw_sources: str | None) -> bool:
+    """Return True if parsed JSON sources contain 'EuropePMC' or 'EuropePMC:Complications'."""
+    if not raw_sources:
+        return False
+    try:
+        parsed = json.loads(raw_sources)
+        if isinstance(parsed, list):
+            return any(str(s).startswith("EuropePMC") for s in parsed)
+    except Exception:
+        pass
+    return "EuropePMC" in str(raw_sources)
+
+
 def download_fulltexts_tier1_to_3(
     conn: sqlite3.Connection,
     fulltext_dir: Path,
     max_downloads: int = 1200,
 ) -> int:
-    """Download open-access full-text XML from Europe PMC for Tier 1-3 articles (D-07, T-01-03)."""
+    """Download open-access full-text XML from Europe PMC for Tier 1-3 articles (D-06, D-07, T-17-04)."""
     fulltext_dir.mkdir(parents=True, exist_ok=True)
     cur = conn.cursor()
 
     rows = cur.execute(
         """
-        SELECT id, pmcid, sources, is_open_access, evidence_tier
+        SELECT id, pmcid, sources, clusters, is_open_access, evidence_tier, cited_by_count
         FROM articles
         WHERE prisma_status = 'included'
           AND evidence_tier IN (1, 2, 3, 4)
           AND pmcid IS NOT NULL
           AND pmcid != ''
-        ORDER BY evidence_tier ASC, cited_by_count DESC
+        ORDER BY
+          CASE WHEN evidence_tier IN (1, 2, 3) THEN 0 ELSE 1 END ASC,
+          CASE
+            WHEN evidence_tier IN (1, 2, 3)
+                 AND (clusters LIKE '%"complications_safety"%' OR sources LIKE '%:Complications"%')
+            THEN 0
+            ELSE 1
+          END ASC,
+          evidence_tier ASC,
+          cited_by_count DESC
         """
     ).fetchall()
 
-    # Prioritize records confirmed in EuropePMC Open Access first
+    # Prioritize records confirmed in EuropePMC Open Access first while preserving SQL priority order
     epmc_rows = []
     other_pmc_rows = []
     for r in rows:
-        srcs = r["sources"] or ""
-        if "EuropePMC" in srcs:
+        pmcid_chk = str(r["pmcid"] or "").strip()
+        if not PMCID_RE.match(pmcid_chk):
+            continue
+        if _has_epmc_source(r["sources"]):
             epmc_rows.append(r)
         else:
             other_pmc_rows.append(r)
 
     candidates = (epmc_rows + other_pmc_rows)[:max_downloads]
-    print(f"[Full-Text XML] Checking/downloading up to {len(candidates)} Tier 1-3 PMC articles (D-07)...", flush=True)
+    print(f"[Full-Text XML] Checking/downloading up to {len(candidates)} Tier 1-3 PMC articles (D-06, D-07)...", flush=True)
 
     success_count = 0
     to_fetch: list[tuple[int, str, Path]] = []
     for r in candidates:
         row_id = r["id"]
         pmcid = str(r["pmcid"]).strip()
-        # T-01-03: Strict regex validation against path traversal
+        # T-17-04: Strict regex validation against path traversal
         if not PMCID_RE.match(pmcid):
             continue
 
@@ -397,8 +604,8 @@ def download_fulltexts_tier1_to_3(
             success_count += 1
             continue
 
-        # Only fetch from EuropePMC REST endpoint if indexed in EuropePMC OA
-        if "EuropePMC" not in (r["sources"] or ""):
+        # Only fetch from EuropePMC REST endpoint if indexed in EuropePMC OA (incl. EuropePMC:Complications)
+        if not _has_epmc_source(r["sources"]):
             continue
 
         to_fetch.append((row_id, pmcid, xml_file))
@@ -447,8 +654,15 @@ def generate_prisma_report(
     raw_dir: Path,
     report_path: Path,
 ) -> None:
-    """Generate reports/dupuytren/prisma_stats.md with full PRISMA flow and breakdowns."""
+    """Generate reports/<id>/prisma_stats.md with full PRISMA flow and breakdowns."""
     cur = conn.cursor()
+    cfg = cfg or {}
+    meta = cfg.get("nosology") or {}
+    nosology_id = cfg.get("nosology_id") or meta.get("id") or "unknown"
+    name_ru = cfg.get("name_ru") or meta.get("name_ru") or nosology_id
+    date_range = cfg.get("date_range") or {}
+    start_year = date_range.get("start_year", 2016)
+    end_year = date_range.get("end_year", 2026)
 
     # Count raw records per source
     raw_pubmed = 0
@@ -470,7 +684,31 @@ def generate_prisma_report(
         except Exception:
             pass
 
-    total_raw = raw_pubmed + raw_epmc + raw_oa
+    raw_pubmed_comp = 0
+    pm_comp_file = raw_dir / "pubmed_complications.json"
+    if pm_comp_file.exists():
+        try:
+            pm_comp_data = json.loads(pm_comp_file.read_text(encoding="utf-8"))
+            if isinstance(pm_comp_data, dict):
+                raw_pubmed_comp = len(pm_comp_data.get("pmids") or pm_comp_data.get("records") or [])
+            elif isinstance(pm_comp_data, list):
+                raw_pubmed_comp = len(pm_comp_data)
+        except Exception:
+            pass
+
+    raw_epmc_comp = 0
+    epmc_comp_file = raw_dir / "europepmc_complications.json"
+    if epmc_comp_file.exists():
+        try:
+            epmc_comp_data = json.loads(epmc_comp_file.read_text(encoding="utf-8"))
+            if isinstance(epmc_comp_data, dict):
+                raw_epmc_comp = len(epmc_comp_data.get("results") or [])
+            elif isinstance(epmc_comp_data, list):
+                raw_epmc_comp = len(epmc_comp_data)
+        except Exception:
+            pass
+
+    total_raw = raw_pubmed + raw_epmc + raw_oa + raw_pubmed_comp + raw_epmc_comp
     total_unique = cur.execute("SELECT COUNT(*) FROM articles").fetchone()[0]
     duplicates_removed = max(0, total_raw - total_unique)
 
@@ -497,7 +735,8 @@ def generate_prisma_report(
         "SELECT COUNT(*) FROM articles WHERE prisma_status = 'included' AND pub_types LIKE '%Narrative Review%'"
     ).fetchone()[0]
     rare_comp_cnt = cur.execute(
-        "SELECT COUNT(*) FROM articles WHERE prisma_status = 'included' AND pub_types LIKE '%Rare Complication%'"
+        "SELECT COUNT(*) FROM articles WHERE prisma_status = 'included' "
+        "AND (pub_types LIKE '%rare_catastrophic_case%' OR pub_types LIKE '%Rare Complication%')"
     ).fetchone()[0]
     preprints_cnt = cur.execute(
         "SELECT COUNT(*) FROM articles WHERE prisma_status = 'included' AND is_preprint = 1"
@@ -539,6 +778,23 @@ def generate_prisma_report(
         ).fetchone()[0]
         cluster_stats.append((c_key, c_name, c_total, c_t12, c_ft))
 
+    if "complications_safety" not in clusters_cfg:
+        c_key = "complications_safety"
+        c_name = "Безопасность лечения и хирургические осложнения (D-05)"
+        c_total = cur.execute(
+            "SELECT COUNT(*) FROM articles WHERE prisma_status = 'included' AND clusters LIKE ?",
+            (f'%"{c_key}"%',),
+        ).fetchone()[0]
+        c_t12 = cur.execute(
+            "SELECT COUNT(*) FROM articles WHERE prisma_status = 'included' AND evidence_tier IN (1, 2) AND clusters LIKE ?",
+            (f'%"{c_key}"%',),
+        ).fetchone()[0]
+        c_ft = cur.execute(
+            "SELECT COUNT(*) FROM articles WHERE prisma_status = 'included' AND has_fulltext_xml = 1 AND clusters LIKE ?",
+            (f'%"{c_key}"%',),
+        ).fetchone()[0]
+        cluster_stats.append((c_key, c_name, c_total, c_t12, c_ft))
+
     ct_total = cur.execute("SELECT COUNT(*) FROM clinical_trials").fetchone()[0]
     ct_status_rows = cur.execute(
         "SELECT overall_status, COUNT(*) as cnt FROM clinical_trials GROUP BY overall_status ORDER BY cnt DESC"
@@ -548,21 +804,27 @@ def generate_prisma_report(
         f"- {k}: {v}" for k, v in sorted(status_map.items()) if k != "included"
     ) or "- Нет исключённых"
 
+    comp_raw_suffix = ""
+    if raw_pubmed_comp > 0 or raw_epmc_comp > 0:
+        comp_raw_suffix = (
+            f"<br/>PubMed:Complications: {raw_pubmed_comp} | EuropePMC:Complications: {raw_epmc_comp}"
+        )
+
     report_path.parent.mkdir(parents=True, exist_ok=True)
     lines = [
-        f"# PRISMA-статистика и карта корпуса: {cfg.get('name_ru')}",
+        f"# PRISMA-статистика и карта корпуса: {name_ru}",
         "",
-        f"**Временной срез:** {cfg['date_range']['start_year']}–{cfg['date_range']['end_year']} гг.",
-        f"**База данных:** `data/{cfg['nosology_id']}/literature.db`",
+        f"**Временной срез:** {start_year}–{end_year} гг.",
+        f"**База данных:** `data/{nosology_id}/literature.db`",
         "",
         "## 1. Воронка отбора публикаций (PRISMA 2020)",
         "",
         "```mermaid",
         "flowchart TD",
-        f'    A["Первичная выгрузка из баз (N = {total_raw})<br/>PubMed: {raw_pubmed} | Europe PMC: {raw_epmc} | OpenAlex: {raw_oa}"] --> B["После дедупликации по PMID / DOI / Заголовку<br/>Уникальных записей: N = {total_unique}<br/>(Удалено дублей: {duplicates_removed})"]',
+        f'    A["Первичная выгрузка из баз (N = {total_raw})<br/>PubMed: {raw_pubmed} | Europe PMC: {raw_epmc} | OpenAlex: {raw_oa}{comp_raw_suffix}"] --> B["После дедупликации по PMID / DOI / Заголовку<br/>Уникальных записей: N = {total_unique}<br/>(Удалено дублей: {duplicates_removed})"]',
         f'    B --> C["PRISMA-скрининг заголовков и абстрактов (N = {total_unique})"]',
         f'    C --> D["Исключено по критериям PRISMA (N = {excluded_total})<br/>{excl_breakdown}"]',
-        f'    C --> E["Включено в итоговый корпус ({cfg.get("name_ru")})<br/>N = {included_total} статей (+ {ct_total} записей ClinicalTrials.gov)"]',
+        f'    C --> E["Включено в итоговый корпус ({name_ru})<br/>N = {included_total} статей (+ {ct_total} записей ClinicalTrials.gov)"]',
         f'    E --> F["Полнотекстовые XML (Europe PMC OA, Tier 1-3): N = {fulltext_total}"]',
         "```",
         "",
@@ -576,7 +838,7 @@ def generate_prisma_report(
         1: "**Tier 1** (Метаанализы, систематические обзоры, РКИ, гайдлайны)",
         2: "**Tier 2** (Проспективные/сравнительные когорты, GWAS, scRNA-seq, наблюдение ≥3 лет)",
         3: f"**Tier 3** (Ретроспективные серии, работы *in vitro*/*ex vivo*, нарративные обзоры [{narrative_reviews_cnt}])",
-        4: f"**Tier 4** (Case reports, письма, комментарии; из них редкие осложнения: {rare_comp_cnt})",
+        4: f"**Tier 4** (Case reports, малые серии N<20, письма, комментарии; из них редкие осложнения: {rare_comp_cnt})",
     }
     for r in tier_rows:
         t = int(r["evidence_tier"])
@@ -590,7 +852,7 @@ def generate_prisma_report(
             "",
             f"- **Включено препринтов (2023–2026, метка `[Preprint]`, D-02):** {preprints_cnt}",
             f"- **Нарративных обзоров в Tier 3 (`D-06`, используются только для проверки полноты ссылок):** {narrative_reviews_cnt}",
-            f"- **Клинических случаев редких осложнений в Tier 4 (`D-05`):** {rare_comp_cnt}",
+            f"- **Клинических случаев редких осложнений в Tier 4 (`D-04`/`D-05`):** {rare_comp_cnt}",
             "",
             "## 3. Распределение по 5 тематическим кластерам",
             "",
@@ -641,17 +903,20 @@ def main() -> None:
     args = parser.parse_args()
 
     cfg_path = Path(args.config)
-    cfg = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
-    nosology_id = cfg["nosology_id"]
-    start_year = int(cfg["date_range"]["start_year"])
-    end_year = int(cfg["date_range"]["end_year"])
-    clusters_cfg = cfg["clusters"]
+    cfg = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+    meta = cfg.get("nosology") or {}
+    nosology_id = cfg.get("nosology_id") or meta.get("id") or cfg_path.stem
+    date_range = cfg.get("date_range") or {}
+    start_year = int(date_range.get("start_year") or 2016)
+    end_year = int(date_range.get("end_year") or 2026)
+    clusters_cfg = cfg.get("clusters") or {}
     triage_rules = cfg.get("triage_rules")
     rare_comp_terms = (
         triage_rules.get("rare_complication_terms", RARE_COMPLICATION_TERMS)
         if triage_rules
         else RARE_COMPLICATION_TERMS
     )
+    comp_terms = (triage_rules or {}).get("complication_terms") or ()
 
     data_dir = Path("data") / nosology_id
     raw_dir = data_dir / "raw"
@@ -663,7 +928,7 @@ def main() -> None:
     cur = conn.cursor()
 
     rows = cur.execute(
-        "SELECT id, title, abstract, pub_year, language, pub_types FROM articles"
+        "SELECT id, title, abstract, pub_year, language, pub_types, sources FROM articles"
     ).fetchall()
     print(f"[Triage] Screening and classifying {len(rows)} unique records for '{nosology_id}'...")
 
@@ -677,15 +942,33 @@ def main() -> None:
             pub_types = json.loads(r["pub_types"] or "[]")
         except Exception:
             pub_types = []
+        sources_list = _parse_sources_list(r["sources"])
 
         p_status = classify_prisma_status(
-            title, abstract, pub_year, lang, start_year, end_year, triage_rules=triage_rules
+            title,
+            abstract,
+            pub_year,
+            lang,
+            start_year,
+            end_year,
+            triage_rules=triage_rules,
+            sources=sources_list,
         )
         if p_status == "included":
             tier, updated_types = classify_evidence_tier(
-                title, abstract, pub_types, rare_complication_terms=rare_comp_terms
+                title,
+                abstract,
+                pub_types,
+                rare_complication_terms=rare_comp_terms,
+                complication_terms=comp_terms,
             )
-            matched_clusters = assign_clusters(title, abstract, clusters_cfg)
+            matched_clusters = assign_clusters(
+                title,
+                abstract,
+                clusters_cfg,
+                sources=sources_list,
+                triage_rules=triage_rules,
+            )
         else:
             tier = 4
             updated_types = pub_types
