@@ -1,17 +1,17 @@
 ---
 gsd_state_version: 1.0
 milestone: v2.0
-milestone_name: Профиль хирургических осложнений и клиническая де-ИИзация выводов
-status: ready_to_execute
+milestone_name: — нелинейная логика клинического выбора и структурный анти-ИИ линтер
+status: executing
 stopped_at: Phase 17 planned (3 plans in 2 waves)
-last_updated: "2026-11-19T16:00:00.000Z"
-last_activity: 2026-11-19
+last_updated: "2026-11-19T16:21:32.061Z"
+last_activity: 2026-11-19 -- Phase 17 execution started
 progress:
-  total_phases: 3
-  completed_phases: 0
-  total_plans: 3
-  completed_plans: 0
-  percent: 0
+  total_phases: 7
+  completed_phases: 4
+  total_plans: 13
+  completed_plans: 10
+  percent: 57
 ---
 
 # Project State
@@ -21,14 +21,14 @@ progress:
 See: `.planning/PROJECT.md` (updated 2026-11-13)
 
 **Core value:** Доказательный, 100% трассируемый по `PMID / DOI / NCT ID` синтез клинической и фундаментальной литературы без галлюцинаций, канцелярита и структурных ИИ-штампов, отражающий реальную неоднозначность хирургического и терапевтического выбора.
-**Current focus:** Milestone `v2.0` — Phase 17: Сбор, PRISMA-триаж и реляционная схема частых осложнений лечения
+**Current focus:** Phase 17 — Сбор, PRISMA-триаж и реляционная схема частых осложнений лечения
 
 ## Current Position
 
-Phase: 17 of 19 (1 of 3 in Milestone v2.0)
-Plan: 0 of 3 executed (`17-01`, `17-02` in Wave 1; `17-03` in Wave 2)
-Status: Ready to execute (`/gsd-execute-phase 17`)
-Last activity: 2026-11-19 — Phase 17 planned & verified (`17-01..03-PLAN.md`, 0 blockers)
+Phase: 17 (Сбор, PRISMA-триаж и реляционная схема частых осложнений лечения) — EXECUTING
+Plan: 1 of 3
+Status: Executing Phase 17
+Last activity: 2026-11-19 -- Phase 17 execution started
 
 Progress: `░░░░░░░░░░` 0%
 

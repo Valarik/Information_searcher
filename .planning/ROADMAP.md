@@ -156,8 +156,8 @@ Plans:
 
 **Wave 1**
 
-- [ ] 17-01: Реляционная схема `extracted_complications`, двойная ось тяжести `Clavien–Dindo` / `CTCAE`, анти-рецидивные парсеры в `extractor_common.py` и агрегация `frequent_complications` в `universal_schema.py` с защитой баз `v1.x`
-- [ ] 17-02: Гибридный API-сбор осложнений в `harvester.py` и двухконтурный PRISMA-триаж с приоритетной выгрузкой XML `complications_safety` в `triage.py`
+- [x] 17-01: Реляционная схема `extracted_complications`, двойная ось тяжести `Clavien–Dindo` / `CTCAE`, анти-рецидивные парсеры в `extractor_common.py` и агрегация `frequent_complications` в `universal_schema.py` с защитой баз `v1.x`
+- [x] 17-02: Гибридный API-сбор осложнений в `harvester.py` и двухконтурный PRISMA-триаж с приоритетной выгрузкой XML `complications_safety` в `triage.py`
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
