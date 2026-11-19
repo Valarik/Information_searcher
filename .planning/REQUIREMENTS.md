@@ -19,10 +19,10 @@
 
 ### 1. Сбор и структурированная экстракция частых осложнений лечения (`COMP`)
 
-- [ ] **COMP-01**: Конфигурация `configs/<id>.yaml` и форма создания нозологии в `app.py` поддерживают флаг `surgical_focus: true/false` и блок целевых запросов `complications_queries` (`pubmed`, `europepmc`), а `src/harvester.py` выполняет отдельный проход выгрузки публикаций по интра- и послеоперационным осложнениям (либо автоматически генерирует подзапрос `Postoperative Complications / Intraoperative Complications / adverse effects` для хирургических нозологий).
-- [ ] **COMP-02**: Скрипт `src/triage.py` размечает публикации по безопасности и осложнениям тегом `complications_safety`, учитывает их в `prisma_stats.md` и включает релевантные работы по хирургическим осложнениям в очередь выгрузки полнотекстовых XML Europe PMC.
-- [ ] **COMP-03**: Схема `src/schema.py` и ядро `src/extractor_common.py` содержат таблицу `extracted_complications` (поля: `article_id`, `modality`, `complication_name`, `timing_category`, `clavien_dindo_grade`, `frequency_pct`, `frequency_num`, `reversibility`, `time_window`, `anatomical_substrate`, `prevention_and_management`, `sample_size`, `pmid`) и функции записи/чтения с безопасной миграцией (`CREATE TABLE IF NOT EXISTS`) для обратной совместимости с базами `v1.x`.
-- [ ] **COMP-04**: Универсальный адаптер `src/universal_schema.py` поддерживает в `kb_index.json` структурированный массив `frequent_complications` (с проверкой обязательных полей в режиме `v2.0` и мягким fallback-режимом для ранее собранных нозологий `v1.x`).
+- [x] **COMP-01**: Конфигурация `configs/<id>.yaml` и форма создания нозологии в `app.py` поддерживают флаг `surgical_focus: true/false` и блок целевых запросов `complications_queries` (`pubmed`, `europepmc`), а `src/harvester.py` выполняет отдельный проход выгрузки публикаций по интра- и послеоперационным осложнениям (либо автоматически генерирует подзапрос `Postoperative Complications / Intraoperative Complications / adverse effects` для хирургических нозологий).
+- [x] **COMP-02**: Скрипт `src/triage.py` размечает публикации по безопасности и осложнениям тегом `complications_safety`, учитывает их в `prisma_stats.md` и включает релевантные работы по хирургическим осложнениям в очередь выгрузки полнотекстовых XML Europe PMC.
+- [x] **COMP-03**: Схема `src/schema.py` и ядро `src/extractor_common.py` содержат таблицу `extracted_complications` (поля: `article_id`, `modality`, `complication_name`, `timing_category`, `clavien_dindo_grade`, `frequency_pct`, `frequency_num`, `reversibility`, `time_window`, `anatomical_substrate`, `prevention_and_management`, `sample_size`, `pmid`) и функции записи/чтения с безопасной миграцией (`CREATE TABLE IF NOT EXISTS`) для обратной совместимости с базами `v1.x`.
+- [x] **COMP-04**: Универсальный адаптер `src/universal_schema.py` поддерживает в `kb_index.json` структурированный массив `frequent_complications` (с проверкой обязательных полей в режиме `v2.0` и мягким fallback-режимом для ранее собранных нозологий `v1.x`).
 
 ### 2. Глубокая структурная и клиническая хуманизация (`HUM2`)
 
@@ -55,10 +55,10 @@
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| COMP-01 | Phase 17 | Pending |
-| COMP-02 | Phase 17 | Pending |
-| COMP-03 | Phase 17 | Pending |
-| COMP-04 | Phase 17 | Pending |
+| COMP-01 | Phase 17 | Complete |
+| COMP-02 | Phase 17 | Complete |
+| COMP-03 | Phase 17 | Complete |
+| COMP-04 | Phase 17 | Complete |
 | HUM2-01 | Phase 18 | Pending |
 | HUM2-02 | Phase 18 | Pending |
 | HUM2-03 | Phase 18 | Pending |
@@ -66,6 +66,7 @@
 | EXPORT-02 | Phase 19 | Pending |
 
 **Coverage:**
+
 - Milestone v2.0 requirements: `9` total
 - Mapped to phases: `9` (`100%`)
 - Unmapped: `0`
