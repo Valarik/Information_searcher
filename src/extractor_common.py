@@ -10,11 +10,61 @@ Provides:
 from __future__ import annotations
 
 import json
+import math
 import re
 import sqlite3
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any
+
+
+NOSOLOGY_ID_RE = re.compile(r"^[a-z0-9_]+$")
+
+
+def validate_nosology_id(raw_id: Any) -> str:
+    """Validate and normalize a nosology identifier against path traversal (CR-01, T-17-03/T-17-05)."""
+    nos_id = str(raw_id or "").strip().lower()
+    if not NOSOLOGY_ID_RE.fullmatch(nos_id):
+        raise ValueError(
+            f"Invalid nosology_id {raw_id!r}: must match ^[a-z0-9_]+$ (lowercase ASCII letters, digits, underscores)"
+        )
+    return nos_id
+
+
+def resolve_treatment_profile_and_focus(cfg: dict[str, Any] | None) -> tuple[str, bool]:
+    """Resolve mutually consistent (treatment_profile, surgical_focus) with top-level override precedence (D-01, WR-08).
+
+    Top-level keys take precedence over nested `nosology.*` keys:
+    - Explicit `treatment_profile == 'conservative'` -> ('conservative', False)
+    - Explicit `surgical_focus` (`cfg['surgical_focus']` if key present, else `meta['surgical_focus']`):
+      - `False` -> ('conservative', False)
+      - `True`  -> (explicit non-conservative profile or 'surgical', True)
+    - Default when omitted -> ('surgical', True)
+    """
+    cfg_dict = cfg if isinstance(cfg, dict) else {}
+    meta = cfg_dict.get("nosology")
+    meta_dict = meta if isinstance(meta, dict) else {}
+
+    if "treatment_profile" in cfg_dict and cfg_dict["treatment_profile"] not in (None, ""):
+        raw_profile = cfg_dict["treatment_profile"]
+    elif "treatment_profile" in meta_dict and meta_dict["treatment_profile"] not in (None, ""):
+        raw_profile = meta_dict["treatment_profile"]
+    else:
+        raw_profile = None
+    explicit_profile = str(raw_profile).strip().lower() if raw_profile is not None else ""
+
+    if "surgical_focus" in cfg_dict and cfg_dict["surgical_focus"] is not None:
+        explicit_focus: bool | None = bool(cfg_dict["surgical_focus"])
+    elif "surgical_focus" in meta_dict and meta_dict["surgical_focus"] is not None:
+        explicit_focus = bool(meta_dict["surgical_focus"])
+    else:
+        explicit_focus = None
+
+    if explicit_profile == "conservative" or explicit_focus is False:
+        return "conservative", False
+
+    profile = explicit_profile if explicit_profile in ("surgical", "mixed") else "surgical"
+    return profile, True
 
 
 def get_db_connection(db_path: str | Path = "data/dupuytren/literature.db") -> sqlite3.Connection:
@@ -103,9 +153,7 @@ def parse_jats_xml(xml_path: str | Path | None) -> dict[str, Any]:
         sec_text = _iter_text(sec)
         if not sec_text:
             continue
-        if any(k in sec_title for k in ("method", "material", "patient", "study design", "cohort", "population")):
-            methods_parts.append(sec_text[:4000])
-        elif any(
+        if any(
             k in sec_title
             for k in (
                 "result",
@@ -123,6 +171,8 @@ def parse_jats_xml(xml_path: str | Path | None) -> dict[str, Any]:
             )
         ):
             results_parts.append(sec_text[:5000])
+        elif any(k in sec_title for k in ("method", "material", "patient", "study design", "cohort", "population")):
+            methods_parts.append(sec_text[:4000])
         elif any(k in sec_title for k in ("discussion", "conclusion")):
             discussion_parts.append(sec_text[:3000])
 
@@ -370,14 +420,30 @@ RECURRENCE_EXCLUSION_PATTERNS: tuple[str, ...] = (
     r"\btrue\s+recurrence\b",
     r"\bdisease\s+recurrence\b",
     r"\brelapse\b",
-    r"\bincomplete\s+(?:release|division|transection)\b",
+    r"\bincomplete\s+(?:release|(?:division|transection)(?!\s+of\s+(?:the\s+)?(?:[\w-]+\s+){0,3}(?:nerve|artery|vessel|tendon|organ|bowel|bladder|ureter)))\b",
     r"\bpersistent\s+triggering\b",
     r"истинн\w*\s+рецидив",
     r"рецидив\s+заболеван",
-    r"неполн\w*\s+(?:релиз|рассечен)",
+    r"неполн\w*\s+(?:релиз|рассечен(?!\w*\s+(?:[\w-]+\s+){0,3}(?:нерв|артери|сосуд|сухожил|орган|киш|мочев)))",
 )
 
 DEFAULT_SEQUELA_TIME_WINDOW = "Фаза послеоперационного ремоделирования (срок требует уточнения)"
+
+
+def _parse_bool_flag(value: Any) -> bool:
+    """Safely parse boolean flags without treating string '0'/'false' as truthy (WR-05)."""
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    if isinstance(value, (int, float)):
+        return bool(value)
+    low = str(value).strip().lower()
+    if low in ("", "0", "false", "no", "off", "none", "null"):
+        return False
+    if low in ("1", "true", "yes", "on"):
+        return True
+    raise ValueError(f"Invalid boolean flag value: {value!r}")
 
 
 def table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
@@ -398,18 +464,19 @@ def is_excluded_recurrence_event(complication_name: str) -> bool:
 
 
 def normalize_clavien_dindo(
-    grade: str | None = None,
+    grade: str | int | None = None,
     ctcae_grade: str | int | None = None,
     requires_reoperation: bool = False,
 ) -> tuple[str, str | None]:
-    """Normalize Clavien-Dindo (I..V) and/or CTCAE Grade 1-5 to canonical (clavien_dindo_grade, ctcae_grade) (D-07)."""
+    """Normalize Clavien-Dindo (I..V) and/or CTCAE Grade 1-5 to canonical (clavien_dindo_grade, ctcae_grade) (D-07, CR-04, WR-05)."""
     normalized_ctcae: str | None = None
     ctcae_mapped: str | None = None
 
     if ctcae_grade is not None and str(ctcae_grade).strip():
         ctcae_raw = str(ctcae_grade).strip()
         m_ctcae = re.fullmatch(
-            r"(?:(?:nci[\s\-–—]*)?ctcae(?:\s+v?\d+(?:\.\d+)?)?\s*)?(?:grade\s*|g)?\s*([1-5])",
+            r"(?:(?:nci[\s\-–—]*)?ctcae(?:\s+v?\d+(?:\.\d+)?)?\s*(?:(?:grade|gr\.?|g)\s*[:\-–—]?|[:\-–—])\s*|"
+            r"(?:grade|gr\.?|g)\s*[:\-–—]?\s*)?([1-5])(?!\.\d)",
             ctcae_raw,
             flags=re.IGNORECASE,
         )
@@ -419,11 +486,12 @@ def normalize_clavien_dindo(
         normalized_ctcae = f"Grade {digit}"
         ctcae_mapped = CTCAE_TO_CLAVIEN_MAP[digit]
 
-    grade_str = (grade or "").strip()
+    grade_str = str(grade).strip() if grade is not None else ""
     if grade_str:
         if "ctcae" in grade_str.lower():
-            m_inline_ctcae = re.search(
-                r"\b(?:nci[\s\-–—]*)?ctcae(?:\s+v?\d+(?:\.\d+)?)?\s*(?:grade\s*|g)?\s*[:\-–—]?\s*([1-5])\b",
+            m_inline_ctcae = re.fullmatch(
+                r"(?:nci[\s\-–—]*)?ctcae(?:\s+v?\d+(?:\.\d+)?)?\s*"
+                r"(?:(?:grade|gr\.?|g)\s*[:\-–—]?|[:\-–—])\s*([1-5])(?!\.\d)",
                 grade_str,
                 flags=re.IGNORECASE,
             )
@@ -468,76 +536,73 @@ def normalize_clavien_dindo(
 
 
 def extract_complication_frequency(text: str) -> tuple[str | None, float | None, int | None]:
-    """Parse '14/76 (18.4%)', '18.4% (14/76)', '15-32%', or '3.2%' while ignoring '95% CI'."""
+    """Parse '14/76 (18.4%)', '18.4% (14/76)', '15-32%', or '3.2%' while ignoring '95% CI' (WR-02)."""
     if not text:
         return None, None, None
 
     # (a) n/N (X.Y%)
-    m = re.search(
+    for m in re.finditer(
         r"\b(\d{1,5})\s*/\s*(\d{1,6})\s*\(\s*(\d{1,2}(?:[.,]\d+)?|100(?:[.,]0+)?)\s*%\s*\)",
         text,
-    )
-    if m:
+    ):
         num, denom = int(m.group(1)), int(m.group(2))
         pct = float(m.group(3).replace(",", "."))
-        if denom > 0 and num <= denom:
+        if denom > 0 and num <= denom and 0.0 <= pct <= 100.0:
             return f"{pct:g}% ({num}/{denom})", pct, denom
 
     # (b) X.Y% (n/N)
-    m = re.search(
+    for m in re.finditer(
         r"\b(\d{1,2}(?:[.,]\d+)?|100(?:[.,]0+)?)\s*%\s*\(\s*(\d{1,5})\s*/\s*(\d{1,6})\s*\)",
         text,
-    )
-    if m:
+    ):
         pct = float(m.group(1).replace(",", "."))
         num, denom = int(m.group(2)), int(m.group(3))
-        if denom > 0 and num <= denom:
+        if denom > 0 and num <= denom and 0.0 <= pct <= 100.0:
             return f"{pct:g}% ({num}/{denom})", pct, denom
 
-    # Strip explicit CI clauses before scanning standalone ranges / percentages so '95% CI 10-28%' is ignored
+    # Strip explicit CI clauses (parenthesized, bracketed, and AMA/JAMA comma-delimited) before scanning percentages
     cleaned = re.sub(
-        r"\(\s*(?:90|95|99)\s*%\s*(?:CI|ДИ|confidence\s+interval)[^)]*\)",
+        r"[\(\[]\s*(?:90|95|99)\s*%\s*(?:CI|ДИ|confidence\s+interval)[^\)\]]*[\)\]]",
         " ",
         text,
         flags=re.IGNORECASE,
     )
     cleaned = re.sub(
-        r"\b(?:90|95|99)\s*%\s*(?:CI|ДИ|confidence\s+interval)\s*[:=]?\s*"
-        r"\d+(?:[.,]\d+)?\s*(?:–|-|—|to)\s*\d+(?:[.,]\d+)?\s*%?",
+        r"\b(?:90|95|99)\s*%\s*(?:CI|ДИ|confidence\s+interval)\s*[,;:=]?\s*"
+        r"\d+(?:[.,]\d+)?\s*%?\s*(?:–|-|—|to|,)\s*\d+(?:[.,]\d+)?\s*%?",
         " ",
         cleaned,
         flags=re.IGNORECASE,
     )
 
     # (c) Range X–Y% / X-Y% / X to Y%
-    m = re.search(
-        r"\b(\d{1,2}(?:[.,]\d+)?|100(?:[.,]0+)?)\s*(?:–|-|—|to)\s*"
+    for m in re.finditer(
+        r"\b(\d{1,2}(?:[.,]\d+)?|100(?:[.,]0+)?)\s*%?\s*(?:–|-|—|to)\s*"
         r"(\d{1,2}(?:[.,]\d+)?|100(?:[.,]0+)?)\s*%(?!\s*(?:CI|ДИ|confidence))",
         cleaned,
         flags=re.IGNORECASE,
-    )
-    if m:
+    ):
         lo = float(m.group(1).replace(",", "."))
         hi = float(m.group(2).replace(",", "."))
-        if lo <= hi <= 100.0:
+        if 0.0 <= lo <= hi <= 100.0:
             mid = round((lo + hi) / 2.0, 2)
             return f"{lo:g}–{hi:g}%", mid, None
 
     # (d) Single X.Y% (ignoring 95% CI)
-    m = re.search(
+    for m in re.finditer(
         r"\b(\d{1,2}(?:[.,]\d+)?|100(?:[.,]0+)?)\s*%(?!\s*(?:CI|ДИ|confidence))",
         cleaned,
         flags=re.IGNORECASE,
-    )
-    if m:
+    ):
         pct = float(m.group(1).replace(",", "."))
-        return f"{pct:g}%", pct, None
+        if 0.0 <= pct <= 100.0:
+            return f"{pct:g}%", pct, None
 
     return None, None, None
 
 
 def extract_clavien_dindo_grade(text: str) -> tuple[str | None, str | None]:
-    """Extract (clavien_dindo_grade, ctcae_grade) mentions from text and normalize via normalize_clavien_dindo."""
+    """Extract (clavien_dindo_grade, ctcae_grade) mentions from text and normalize via normalize_clavien_dindo (CR-04)."""
     if not text:
         return None, None
 
@@ -559,14 +624,16 @@ def extract_clavien_dindo_grade(text: str) -> tuple[str | None, str | None]:
     if m_cd:
         cd_raw = m_cd.group(1)
 
+    # Require explicit grade marker (grade/gr/g) and reject CTCAE version numbers such as 'CTCAE 4.0' / 'CTCAE 5.0' (CR-04)
     m_ctcae = re.search(
-        r"\b(?:nci[\s\-–—]*)?ctcae(?:\s+v?\d+(?:\.\d+)?)?\s*(?:grade|g)?\s*[:\-–—]?\s*([1-5])\b",
+        r"\b(?:nci[\s\-–—]*)?ctcae(?:\s+v?\d+(?:\.\d+)?)?\s*"
+        r"(?:grade|gr\.?|g)\s*[:\-–—]?\s*([1-5])(?!\.\d)\b",
         text,
         flags=re.IGNORECASE,
     )
     if not m_ctcae:
         m_ctcae = re.search(
-            r"\bgrade\s+([1-5])\b[^.]{0,30}\bctcae\b",
+            r"\bgrade\s+([1-5])(?!\.\d)\b[^.]{0,30}\bctcae\b",
             text,
             flags=re.IGNORECASE,
         )
@@ -662,18 +729,37 @@ def insert_extracted_complication(
         time_window = time_window_raw or None
 
     raw_tier = record.get("evidence_tier")
+    if isinstance(raw_tier, bool):
+        raise ValueError(f"Invalid evidence_tier: {raw_tier!r}")
     evidence_tier = int(raw_tier) if raw_tier is not None and str(raw_tier).strip() != "" else None
+    if evidence_tier is not None and evidence_tier not in (1, 2, 3, 4):
+        raise ValueError(f"Invalid evidence_tier: {evidence_tier!r} (expected 1..4)")
 
     raw_sample_size = record.get("sample_size")
-    sample_size = int(raw_sample_size) if raw_sample_size is not None and str(raw_sample_size).strip() != "" else None
+    if isinstance(raw_sample_size, bool):
+        raise ValueError(f"Invalid sample_size: {raw_sample_size!r}")
+    if raw_sample_size is not None and str(raw_sample_size).strip() != "":
+        sample_size_f = float(raw_sample_size)
+        if not math.isfinite(sample_size_f) or sample_size_f <= 0:
+            raise ValueError(f"Invalid sample_size: {raw_sample_size!r} (must be finite and > 0)")
+        sample_size: int | None = int(sample_size_f)
+    else:
+        sample_size = None
 
     raw_freq_num = record.get("frequency_num")
-    frequency_num = float(raw_freq_num) if raw_freq_num is not None and str(raw_freq_num).strip() != "" else None
+    if isinstance(raw_freq_num, bool):
+        raise ValueError(f"Invalid frequency_num: {raw_freq_num!r}")
+    if raw_freq_num is not None and str(raw_freq_num).strip() != "":
+        frequency_num: float | None = float(raw_freq_num)
+        if not math.isfinite(frequency_num) or frequency_num < 0.0 or frequency_num > 100.0:
+            raise ValueError(f"Invalid frequency_num: {raw_freq_num!r} (must be finite in [0.0, 100.0])")
+    else:
+        frequency_num = None
 
     is_rare_casuistry = (
         1
         if (
-            bool(record.get("is_rare_casuistry"))
+            _parse_bool_flag(record.get("is_rare_casuistry"))
             or evidence_tier == 4
             or (sample_size is not None and sample_size < 20)
         )

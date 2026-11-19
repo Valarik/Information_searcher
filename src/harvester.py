@@ -35,6 +35,7 @@ truststore.inject_into_ssl()
 import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from src.extractor_common import resolve_treatment_profile_and_focus, validate_nosology_id
 from src.schema import init_db
 
 SKILLS_ROOT = Path.home() / ".gemini" / "config" / "plugins" / "science" / "skills"
@@ -69,30 +70,29 @@ CONSERVATIVE_EPMC_COMP_BLOCK = (
 )
 
 
+def _write_json_atomic(target: Path, payload: Any) -> None:
+    """Atomically persist JSON cache via temporary sibling file + replace (CR-03)."""
+    tmp_path = target.with_name(f".{target.name}.tmp.{os.getpid()}")
+    tmp_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    tmp_path.replace(target)
+
+
 def resolve_treatment_profile(cfg: dict[str, Any]) -> str:
-    """Return 'conservative' only when explicitly configured; default to 'surgical' (D-01)."""
-    cfg = cfg or {}
-    meta = cfg.get("nosology") or {}
-    profile = str(cfg.get("treatment_profile") or meta.get("treatment_profile") or "").strip().lower()
-    if profile == "conservative":
-        return "conservative"
-    if "surgical_focus" in cfg and cfg["surgical_focus"] is False:
-        return "conservative"
-    if "surgical_focus" in meta and meta["surgical_focus"] is False:
-        return "conservative"
-    return "surgical"
+    """Return 'conservative' only when explicitly configured; default to 'surgical' (D-01, WR-08)."""
+    profile, surgical_focus = resolve_treatment_profile_and_focus(cfg)
+    return "conservative" if not surgical_focus else ("surgical" if profile != "conservative" else "conservative")
 
 
 def build_complications_queries(cfg: dict[str, Any]) -> dict[str, Any]:
-    """Return explicit or auto-generated PubMed & Europe PMC complication queries (COMP-01, D-01, D-02)."""
-    cfg = cfg or {}
-    meta = cfg.get("nosology") or {}
+    """Return explicit or auto-generated PubMed & Europe PMC complication queries (COMP-01, D-01, D-02, IN-02)."""
+    cfg = cfg if isinstance(cfg, dict) else {}
+    meta = cfg.get("nosology") if isinstance(cfg.get("nosology"), dict) else {}
     explicit = cfg.get("complications_queries") or meta.get("complications_queries") or {}
     if not isinstance(explicit, dict):
         explicit = {}
 
     profile = resolve_treatment_profile(cfg)
-    date_range = cfg.get("date_range") or {}
+    date_range = cfg.get("date_range") if isinstance(cfg.get("date_range"), dict) else {}
     start_year = int(date_range.get("start_year") or 2016)
     end_year = int(date_range.get("end_year") or 2026)
     start_date = str(date_range.get("start_date") or f"{start_year}-01-01")
@@ -122,19 +122,35 @@ def build_complications_queries(cfg: dict[str, Any]) -> dict[str, Any]:
     else:
         auto_pubmed = f"{pm_comp} AND {pm_date_clause}"
 
-    epmc_date_clause = f"(FIRST_PDATE:[{start_date} TO {end_date}])"
+    epmc_start = start_date.replace("/", "-")
+    epmc_end = end_date.replace("/", "-")
+    epmc_date_clause = f"(FIRST_PDATE:[{epmc_start} TO {epmc_end}])"
     if epmc_disease_parts:
         auto_epmc = f"(({' OR '.join(epmc_disease_parts)}) AND {epmc_comp}) AND {epmc_date_clause}"
     else:
         auto_epmc = f"{epmc_comp} AND {epmc_date_clause}"
 
+    explicit_pm = str(explicit.get("pubmed") or "").strip()
+    explicit_epmc = str(explicit.get("europepmc") or "").strip()
+
+    raw_pm_max = (
+        explicit["pubmed_max_results"]
+        if explicit.get("pubmed_max_results") is not None
+        else (explicit["max_results"] if explicit.get("max_results") is not None else 800)
+    )
+    raw_epmc_max = (
+        explicit["europepmc_max_results"]
+        if explicit.get("europepmc_max_results") is not None
+        else (explicit["max_results"] if explicit.get("max_results") is not None else 1000)
+    )
+
     return {
         "profile": profile,
         "surgical_focus": profile != "conservative",
-        "pubmed": (explicit.get("pubmed") or "").strip() or auto_pubmed,
-        "europepmc": (explicit.get("europepmc") or "").strip() or auto_epmc,
-        "pubmed_max_results": int(explicit.get("pubmed_max_results") or explicit.get("max_results") or 800),
-        "europepmc_max_results": int(explicit.get("europepmc_max_results") or explicit.get("max_results") or 1000),
+        "pubmed": explicit_pm or auto_pubmed,
+        "europepmc": explicit_epmc or auto_epmc,
+        "pubmed_max_results": int(raw_pm_max),
+        "europepmc_max_results": int(raw_epmc_max),
     }
 
 
@@ -754,56 +770,63 @@ def harvest_pubmed_complications(
                 flush=True,
             )
             abs_list = pubmed_mod.fetch_article_abstracts(batch)
+            if isinstance(abs_list, dict) and "error" in abs_list:
+                raise RuntimeError(f"PubMed complications efetch error (batch {b_idx + 1}): {abs_list}")
+            if not isinstance(abs_list, list):
+                raise RuntimeError(f"Unexpected PubMed complications efetch payload type: {type(abs_list).__name__}")
+
             sum_list = pubmed_mod.fetch_database_summary("pubmed", batch)
+            if isinstance(sum_list, dict) and "error" in sum_list:
+                raise RuntimeError(f"PubMed complications esummary error (batch {b_idx + 1}): {sum_list}")
+            if not isinstance(sum_list, list):
+                raise RuntimeError(f"Unexpected PubMed complications esummary payload type: {type(sum_list).__name__}")
 
             sum_by_uid: dict[str, dict[str, Any]] = {}
-            if isinstance(sum_list, list):
-                for s in sum_list:
-                    if isinstance(s, dict) and s.get("uid"):
-                        sum_by_uid[str(s["uid"])] = s
+            for s in sum_list:
+                if isinstance(s, dict) and s.get("uid"):
+                    sum_by_uid[str(s["uid"])] = s
 
-            if isinstance(abs_list, list):
-                for item in abs_list:
-                    if not isinstance(item, dict):
-                        continue
-                    pmid = str(item.get("pmid") or "").strip()
-                    if not pmid:
-                        continue
-                    s_info = sum_by_uid.get(pmid, {})
-                    pub_types = s_info.get("pubtype") or []
-                    langs = s_info.get("lang") or ["eng"]
-                    lang = langs[0] if isinstance(langs, list) and langs else "eng"
-                    pmcid = None
-                    doi = item.get("doi")
-                    for aid in s_info.get("articleids") or []:
-                        if isinstance(aid, dict):
-                            if aid.get("idtype") == "pmc" and aid.get("value"):
-                                val = str(aid["value"]).strip()
-                                pmcid = val if val.startswith("PMC") else f"PMC{val}"
-                            elif aid.get("idtype") == "doi" and not doi:
-                                doi = aid.get("value")
+            for item in abs_list:
+                if not isinstance(item, dict):
+                    continue
+                pmid = str(item.get("pmid") or "").strip()
+                if not pmid:
+                    continue
+                s_info = sum_by_uid.get(pmid, {})
+                pub_types = s_info.get("pubtype") or []
+                langs = s_info.get("lang") or ["eng"]
+                lang = langs[0] if isinstance(langs, list) and langs else "eng"
+                pmcid = None
+                doi = item.get("doi")
+                for aid in s_info.get("articleids") or []:
+                    if isinstance(aid, dict):
+                        if aid.get("idtype") == "pmc" and aid.get("value"):
+                            val = str(aid["value"]).strip()
+                            pmcid = val if val.startswith("PMC") else f"PMC{val}"
+                        elif aid.get("idtype") == "doi" and not doi:
+                            doi = aid.get("value")
 
-                    pubdate = item.get("pubdate") or s_info.get("pubdate") or ""
-                    pub_year = extract_year(pubdate)
+                pubdate = item.get("pubdate") or s_info.get("pubdate") or ""
+                pub_year = extract_year(pubdate)
 
-                    records.append(
-                        {
-                            "pmid": pmid,
-                            "pmcid": pmcid,
-                            "doi": doi,
-                            "title": item.get("title") or s_info.get("title") or "",
-                            "abstract": item.get("abstract"),
-                            "journal": item.get("journal") or s_info.get("fulljournalname") or s_info.get("source"),
-                            "pub_year": pub_year,
-                            "pub_date": pubdate,
-                            "authors": item.get("authors") or [],
-                            "language": lang,
-                            "pub_types": pub_types,
-                            "is_preprint": "Preprint" in pub_types,
-                            "is_open_access": bool(pmcid),
-                            "sources": ["PubMed:Complications"],
-                        }
-                    )
+                records.append(
+                    {
+                        "pmid": pmid,
+                        "pmcid": pmcid,
+                        "doi": doi,
+                        "title": item.get("title") or s_info.get("title") or "",
+                        "abstract": item.get("abstract"),
+                        "journal": item.get("journal") or s_info.get("fulljournalname") or s_info.get("source"),
+                        "pub_year": pub_year,
+                        "pub_date": pubdate,
+                        "authors": item.get("authors") or [],
+                        "language": lang,
+                        "pub_types": pub_types,
+                        "is_preprint": "Preprint" in pub_types,
+                        "is_open_access": bool(pmcid),
+                        "sources": ["PubMed:Complications"],
+                    }
+                )
 
         payload = {
             "query": query,
@@ -811,7 +834,7 @@ def harvest_pubmed_complications(
             "pmids": pmids,
             "records": records,
         }
-        cache_file.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+        _write_json_atomic(cache_file, payload)
 
     for rec in records:
         if not isinstance(rec, dict):
@@ -848,14 +871,17 @@ def harvest_europepmc_complications(
             result_type="core",
             cursor="*",
         )
-        res_dict = res_data if isinstance(res_data, dict) else {}
+        if isinstance(res_data, dict) and "error" in res_data:
+            raise RuntimeError(f"EuropePMC complications search error: {res_data}")
+        if not isinstance(res_data, dict):
+            raise RuntimeError(f"Unexpected EuropePMC complications payload type: {type(res_data).__name__}")
         data = {
             "query": query,
             "profile": profile,
-            "hitCount": res_dict.get("hitCount", 0),
-            "results": res_dict.get("results") or [],
+            "hitCount": res_data.get("hitCount", 0),
+            "results": res_data.get("results") or [],
         }
-        cache_file.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+        _write_json_atomic(cache_file, data)
 
     results = data.get("results") or [] if isinstance(data, dict) else []
     for r in results:
@@ -924,11 +950,15 @@ def main() -> None:
         sys.exit(1)
 
     cfg = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
-    nosology_id = cfg.get("nosology_id") or (cfg.get("nosology") or {}).get("id") or cfg_path.stem
+    meta = cfg.get("nosology") if isinstance(cfg.get("nosology"), dict) else {}
+    nosology_id = validate_nosology_id(cfg.get("nosology_id") or meta.get("id") or cfg_path.stem)
     queries = cfg.get("queries") or {}
     date_range = cfg.get("date_range") or {}
 
-    data_dir = Path("data") / nosology_id
+    base_data = Path("data").resolve()
+    data_dir = (base_data / nosology_id).resolve()
+    if not data_dir.is_relative_to(base_data):
+        raise ValueError(f"Path traversal blocked for nosology_id={nosology_id!r}")
     raw_dir = data_dir / "raw"
     raw_dir.mkdir(parents=True, exist_ok=True)
     db_path = data_dir / "literature.db"

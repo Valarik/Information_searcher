@@ -14,7 +14,9 @@ Provides a 100% disease-agnostic data layer for any nosology configured in `conf
 from __future__ import annotations
 
 import argparse
+import copy
 import json
+import math
 import re
 import sqlite3
 import statistics
@@ -22,6 +24,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 import markdown
 import pandas as pd
@@ -37,7 +40,9 @@ from src.extractor_common import (
     VALID_EVENT_CLASS,
     VALID_REVERSIBILITY,
     is_excluded_recurrence_event,
+    resolve_treatment_profile_and_focus,
     table_exists,
+    validate_nosology_id,
 )
 
 CONFIGS_DIR = PROJECT_ROOT / "configs"
@@ -122,43 +127,44 @@ _REVERSIBILITY_SEVERITY_RANK: dict[str, int] = {
 
 
 def _connect_sqlite_readonly(db_path: Path) -> sqlite3.Connection:
-    """Open an existing SQLite DB in strict read-only URI mode without creating/mutating files (T-17-02, D-09)."""
+    """Open an existing SQLite DB strictly read-only without ever falling back to RW mode (CR-02, T-17-02, D-09)."""
     resolved = db_path.resolve()
+    encoded_path = quote(resolved.as_posix(), safe="/:")
     try:
-        conn = sqlite3.connect(f"file:{resolved.as_posix()}?mode=ro", uri=True)
+        conn = sqlite3.connect(f"file:{encoded_path}?mode=ro", uri=True)
     except sqlite3.OperationalError:
-        conn = sqlite3.connect(str(db_path))
+        conn = sqlite3.connect(f"file:{encoded_path}?mode=ro&immutable=1", uri=True)
+    conn.execute("PRAGMA query_only = ON;")
     conn.row_factory = sqlite3.Row
     return conn
 
 
 def discover_nosologies(configs_dir: Path = CONFIGS_DIR) -> list[dict[str, Any]]:
-    """Scan `configs/*.yaml` and return metadata for all configured nosologies."""
+    """Scan `configs/*.yaml` and return metadata for all configured nosologies (CR-01, WR-08)."""
     items: list[dict[str, Any]] = []
     if not configs_dir.exists():
         return items
+    data_root = DATA_DIR.resolve()
+    reports_root = REPORTS_DIR.resolve()
     for cfg_path in sorted(configs_dir.glob("*.yaml")):
         try:
             raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
         except Exception:
             continue
-        meta = raw.get("nosology", {}) or {}
-        nos_id = meta.get("id") or raw.get("nosology_id") or cfg_path.stem
-        db_path = DATA_DIR / nos_id / "literature.db"
-        kb_path = REPORTS_DIR / nos_id / "knowledge_base" / "kb_index.json"
+        if not isinstance(raw, dict):
+            continue
+        meta = raw.get("nosology") if isinstance(raw.get("nosology"), dict) else {}
+        raw_nos_id = meta.get("id") or raw.get("nosology_id") or cfg_path.stem
+        try:
+            nos_id = validate_nosology_id(raw_nos_id)
+        except ValueError:
+            continue
+        db_path = (DATA_DIR / nos_id / "literature.db").resolve()
+        kb_path = (REPORTS_DIR / nos_id / "knowledge_base" / "kb_index.json").resolve()
+        if not db_path.is_relative_to(data_root) or not kb_path.is_relative_to(reports_root):
+            continue
 
-        raw_profile = raw.get("treatment_profile") or meta.get("treatment_profile")
-        treatment_profile = str(raw_profile).strip().lower() if raw_profile else None
-        if treatment_profile == "conservative":
-            surgical_focus = False
-        elif "surgical_focus" in raw and raw["surgical_focus"] is False:
-            surgical_focus = False
-        elif "surgical_focus" in meta and meta["surgical_focus"] is False:
-            surgical_focus = False
-        else:
-            surgical_focus = True
-        if treatment_profile is None:
-            treatment_profile = "conservative" if not surgical_focus else "surgical"
+        treatment_profile, surgical_focus = resolve_treatment_profile_and_focus(raw)
 
         items.append(
             {
@@ -251,10 +257,10 @@ def aggregate_complications_from_sqlite(
                 SELECT
                     c.id,
                     c.article_id,
-                    c.pmid,
-                    c.doi,
+                    COALESCE(c.pmid, a.pmid) AS pmid,
+                    COALESCE(c.doi, a.doi) AS doi,
                     c.first_author_year,
-                    c.evidence_tier,
+                    COALESCE(c.evidence_tier, a.evidence_tier) AS evidence_tier,
                     c.modality,
                     c.complication_name,
                     c.event_class,
@@ -337,6 +343,7 @@ def aggregate_complications_from_sqlite(
 
     for group_rows in groups.values():
         cohort_rows: list[sqlite3.Row] = []
+        qualitative_cohort_rows: list[sqlite3.Row] = []
         casuistry_rows: list[sqlite3.Row] = []
 
         for r in group_rows:
@@ -353,6 +360,14 @@ def aggregate_complications_from_sqlite(
                 and freq_num is not None
             ):
                 cohort_rows.append(r)
+            elif (
+                tier in (1, 2, 3)
+                and n_val is not None
+                and int(n_val) >= 20
+                and is_cas == 0
+                and freq_num is None
+            ):
+                qualitative_cohort_rows.append(r)
             elif tier == 4 or n_val is None or int(n_val) < 20 or is_cas == 1:
                 casuistry_rows.append(r)
 
@@ -397,33 +412,44 @@ def aggregate_complications_from_sqlite(
                 "requires_reoperation",
                 "permanent_deficit",
             ):
+                # D-09 red-flag schema invariant: frequency_max_num < 1.0; if single outlier cohort reached >=1% while median < 1%, label median explicitly
+                if f_max < 1.0:
+                    rf_pct = freq_pct
+                    rf_num = f_max
+                else:
+                    rf_pct = f"медиана {med:g}% (разброс когорт {f_min:g}–{f_max:g}%)"
+                    rf_num = med
                 rare_critical_red_flags.append(
                     {
                         "modality": rep["modality"],
                         "complication_name": rep["complication_name"],
                         "clavien_dindo_grade": rep["clavien_dindo_grade"],
                         "reversibility": rep["reversibility"],
-                        "frequency_pct": freq_pct,
-                        "frequency_max_num": f_max if f_max < 1.0 else med,
+                        "frequency_pct": rf_pct,
+                        "frequency_max_num": rf_num,
                         "anatomical_substrate": rep["anatomical_substrate"],
                         "prevention_and_management": rep["prevention_and_management"],
                         "evidence_pmids": rep["evidence_pmids"],
                     }
                 )
-        elif casuistry_rows:
-            rep = _pick_representative(casuistry_rows)
+        elif qualitative_cohort_rows or casuistry_rows:
+            fallback_rows = qualitative_cohort_rows if qualitative_cohort_rows else casuistry_rows
+            rep = _pick_representative(fallback_rows)
             if rep["clavien_dindo_grade"] in ("IIIa", "IIIb", "IV", "V") or rep["reversibility"] in (
                 "requires_reoperation",
                 "permanent_deficit",
             ):
                 explicit_low = [
                     float(r["frequency_num"])
-                    for r in casuistry_rows
+                    for r in fallback_rows
                     if r["frequency_num"] is not None and 0.0 <= float(r["frequency_num"]) < 1.0
                 ]
                 if explicit_low:
                     freq_max_num = round(max(explicit_low), 2)
                     freq_pct = f"{freq_max_num:g}% (единичные клинические наблюдения Tier 4)"
+                elif qualitative_cohort_rows:
+                    freq_max_num = 0.49
+                    freq_pct = "< 1% (качественное упоминание в когорте Tier 1–3 без точного %)"
                 else:
                     freq_max_num = 0.49
                     freq_pct = "< 0.5% (единичные клинические наблюдения Tier 4)"
@@ -443,10 +469,10 @@ def aggregate_complications_from_sqlite(
                 )
 
     frequent_complications.sort(
-        key=lambda item: (item["modality"], -float(item["frequency_median_num"]), item["complication_name"])
+        key=lambda item: (item["modality"].lower(), -float(item["frequency_median_num"]), item["complication_name"])
     )
     rare_critical_red_flags.sort(
-        key=lambda item: (item["modality"], -float(item["frequency_max_num"]), item["complication_name"])
+        key=lambda item: (item["modality"].lower(), -float(item["frequency_max_num"]), item["complication_name"])
     )
     return frequent_complications, rare_critical_red_flags
 
@@ -950,7 +976,7 @@ def query_clinical_trials_df(db_path: Path) -> pd.DataFrame:
 
 
 def query_complications_df(db_path: Path, *, include_casuistry: bool = True) -> pd.DataFrame:
-    """Load `extracted_complications` joined with article metadata safely (empty DataFrame if table absent, D-09/T-17-02)."""
+    """Load `extracted_complications` joined with article metadata safely (empty DataFrame if table absent, D-09/T-17-02/IN-04)."""
     if not db_path.exists():
         return pd.DataFrame()
     conn = _connect_sqlite_readonly(db_path)
@@ -958,16 +984,16 @@ def query_complications_df(db_path: Path, *, include_casuistry: bool = True) -> 
         if not table_exists(conn, "extracted_complications"):
             return pd.DataFrame()
         where_clause = "WHERE COALESCE(c.is_rare_casuistry, 0) = 0" if not include_casuistry else ""
-        df = pd.read_sql_query(
-            f"""
+        if table_exists(conn, "articles"):
+            sql = f"""
             SELECT
                 c.id,
                 c.article_id,
-                c.pmid,
-                c.doi,
+                COALESCE(c.pmid, a.pmid) AS pmid,
+                COALESCE(c.doi, a.doi) AS doi,
                 c.first_author_year,
                 a.pub_year,
-                c.evidence_tier,
+                COALESCE(c.evidence_tier, a.evidence_tier) AS evidence_tier,
                 c.modality,
                 c.complication_name,
                 c.event_class,
@@ -986,10 +1012,38 @@ def query_complications_df(db_path: Path, *, include_casuistry: bool = True) -> 
             FROM extracted_complications c
             LEFT JOIN articles a ON c.article_id = a.id
             {where_clause}
+            ORDER BY c.modality ASC, COALESCE(c.frequency_num, -1.0) DESC, COALESCE(c.evidence_tier, a.evidence_tier) ASC
+            """
+        else:
+            sql = f"""
+            SELECT
+                c.id,
+                c.article_id,
+                c.pmid,
+                c.doi,
+                c.first_author_year,
+                NULL AS pub_year,
+                c.evidence_tier,
+                c.modality,
+                c.complication_name,
+                c.event_class,
+                c.timing_category,
+                c.clavien_dindo_grade,
+                c.ctcae_grade,
+                c.frequency_pct,
+                c.frequency_num,
+                c.reversibility,
+                c.time_window,
+                c.anatomical_substrate,
+                c.prevention_and_management,
+                c.sample_size,
+                c.is_rare_casuistry,
+                NULL AS title
+            FROM extracted_complications c
+            {where_clause}
             ORDER BY c.modality ASC, COALESCE(c.frequency_num, -1.0) DESC, c.evidence_tier ASC
-            """,
-            conn,
-        )
+            """
+        df = pd.read_sql_query(sql, conn)
     finally:
         conn.close()
     if not df.empty:
@@ -1003,47 +1057,51 @@ def query_complications_df(db_path: Path, *, include_casuistry: bool = True) -> 
 
 
 def save_new_nosology_config(config_payload: dict[str, Any]) -> Path:
-    """Save a new nosology configuration to `configs/<id>.yaml` with normalized surgical_focus & YAML safety (T-17-05)."""
-    nos_meta = config_payload.setdefault("nosology", {})
-    nos_id = str(nos_meta.get("id") or config_payload.get("nosology_id") or "").strip().lower()
-    if not nos_id or not re.fullmatch(r"[a-z0-9_]+", nos_id):
-        raise ValueError("Идентификатор нозологии должен содержать только латинские буквы, цифры и '_'")
+    """Save a new nosology configuration to `configs/<id>.yaml` with normalized surgical_focus & YAML safety (T-17-05, WR-04, WR-08)."""
+    payload = copy.deepcopy(config_payload)
+    nos_meta = payload.get("nosology")
+    if not isinstance(nos_meta, dict):
+        nos_meta = {}
+        payload["nosology"] = nos_meta
+
+    raw_nos_id = nos_meta.get("id") or payload.get("nosology_id") or ""
+    try:
+        nos_id = validate_nosology_id(raw_nos_id)
+    except ValueError as exc:
+        raise ValueError(
+            "Идентификатор нозологии должен содержать только латинские буквы, цифры и '_'"
+        ) from exc
     nos_meta["id"] = nos_id
 
-    raw_profile = config_payload.get("treatment_profile") or nos_meta.get("treatment_profile")
-    treatment_profile = str(raw_profile).strip().lower() if raw_profile else ""
-    if (
-        treatment_profile == "conservative"
-        or config_payload.get("surgical_focus") is False
-        or nos_meta.get("surgical_focus") is False
-    ):
-        nos_meta["surgical_focus"] = False
-    else:
-        nos_meta["surgical_focus"] = True
-    if treatment_profile:
+    treatment_profile, surgical_focus = resolve_treatment_profile_and_focus(payload)
+    nos_meta["surgical_focus"] = surgical_focus
+    if "treatment_profile" in payload or "treatment_profile" in nos_meta or not surgical_focus:
         nos_meta["treatment_profile"] = treatment_profile
 
-    comp_queries = config_payload.get("complications_queries")
+    comp_queries = payload.get("complications_queries")
     if isinstance(comp_queries, dict):
         cleaned_queries = {
             k: v
             for k, v in comp_queries.items()
-            if k in ("pubmed", "europepmc", "max_results") and v not in (None, "")
+            if k in ("pubmed", "europepmc", "max_results", "pubmed_max_results", "europepmc_max_results")
+            and v not in (None, "")
         }
         if cleaned_queries:
-            config_payload["complications_queries"] = cleaned_queries
+            payload["complications_queries"] = cleaned_queries
+        else:
+            payload.pop("complications_queries", None)
 
     CONFIGS_DIR.mkdir(parents=True, exist_ok=True)
     out_path = (CONFIGS_DIR / f"{nos_id}.yaml").resolve()
     if out_path.parent != CONFIGS_DIR.resolve():
         raise ValueError("Недопустимый путь сохранения конфигурации нозологии")
-    yaml_str = yaml.safe_dump(config_payload, allow_unicode=True, sort_keys=False)
+    yaml_str = yaml.safe_dump(payload, allow_unicode=True, sort_keys=False)
     out_path.write_text(yaml_str, encoding="utf-8")
     return out_path
 
 
 def validate_kb_complications_v2(kb: dict[str, Any]) -> list[str]:
-    """Validate schema_version '2.0' frequent_complications and rare_critical_red_flags contract (COMP-04, D-07..D-09)."""
+    """Validate schema_version '2.0' frequent_complications and rare_critical_red_flags contract (COMP-04, D-07..D-09, CR-05)."""
     errors: list[str] = []
     if str(kb.get("schema_version", "")) != "2.0":
         errors.append(f"Expected schema_version == '2.0', got {kb.get('schema_version')!r}")
@@ -1060,6 +1118,10 @@ def validate_kb_complications_v2(kb: dict[str, Any]) -> list[str]:
             missing = [k for k in REQUIRED_COMPLICATION_ENTRY_KEYS if k not in entry]
             if missing:
                 errors.append(f"frequent_complications[{idx}] missing keys: {missing}")
+
+            mod = str(entry.get("modality") or "").strip()
+            if not mod:
+                errors.append(f"frequent_complications[{idx}] has empty modality")
 
             comp_name = str(entry.get("complication_name") or "").strip()
             if not comp_name:
@@ -1086,31 +1148,47 @@ def validate_kb_complications_v2(kb: dict[str, Any]) -> list[str]:
                 )
 
             med_raw = entry.get("frequency_median_num")
-            if isinstance(med_raw, bool) or not isinstance(med_raw, (int, float)):
-                errors.append(f"frequent_complications[{idx}] frequency_median_num must be numeric")
+            if (
+                isinstance(med_raw, bool)
+                or not isinstance(med_raw, (int, float))
+                or not math.isfinite(float(med_raw))
+            ):
+                errors.append(f"frequent_complications[{idx}] frequency_median_num must be a finite number")
             else:
                 med_val = float(med_raw)
                 if med_val < 1.0:
                     errors.append(
                         f"frequent_complications[{idx}] frequency_median_num must be >= 1.0, got {med_val}"
                     )
-                mod = str(entry.get("modality") or "").strip()
-                if mod:
-                    if mod in last_median_by_modality and med_val > last_median_by_modality[mod]:
+                elif med_val > 100.0:
+                    errors.append(
+                        f"frequent_complications[{idx}] frequency_median_num must be <= 100.0, got {med_val}"
+                    )
+                elif mod:
+                    mod_key = mod.lower()
+                    if mod_key in last_median_by_modality and med_val > last_median_by_modality[mod_key]:
                         errors.append(
                             f"frequent_complications[{idx}] for modality '{mod}' is not sorted descending "
-                            f"by frequency_median_num ({med_val} > {last_median_by_modality[mod]})"
+                            f"by frequency_median_num ({med_val} > {last_median_by_modality[mod_key]})"
                         )
-                    last_median_by_modality[mod] = med_val
+                    last_median_by_modality[mod_key] = med_val
 
             n_raw = entry.get("sample_size_total")
-            if isinstance(n_raw, bool) or not isinstance(n_raw, (int, float)) or int(n_raw) < 20:
+            if (
+                isinstance(n_raw, bool)
+                or not isinstance(n_raw, (int, float))
+                or not math.isfinite(float(n_raw))
+            ):
+                errors.append(
+                    f"frequent_complications[{idx}] sample_size_total must be a finite number, got {n_raw!r}"
+                )
+            elif int(n_raw) < 20:
                 errors.append(
                     f"frequent_complications[{idx}] sample_size_total must be >= 20, got {n_raw!r}"
                 )
 
             pmids = entry.get("evidence_pmids")
-            if not isinstance(pmids, list) or not any(str(p).strip() for p in pmids):
+            if not isinstance(pmids, list) or not any(p is not None and str(p).strip() for p in pmids):
                 errors.append(f"frequent_complications[{idx}] evidence_pmids must be a non-empty list")
 
     red_flags = kb.get("rare_critical_red_flags")
@@ -1124,6 +1202,10 @@ def validate_kb_complications_v2(kb: dict[str, Any]) -> list[str]:
             missing = [k for k in REQUIRED_RED_FLAG_KEYS if k not in entry]
             if missing:
                 errors.append(f"rare_critical_red_flags[{idx}] missing keys: {missing}")
+
+            mod = str(entry.get("modality") or "").strip()
+            if not mod:
+                errors.append(f"rare_critical_red_flags[{idx}] has empty modality")
 
             comp_name = str(entry.get("complication_name") or "").strip()
             if not comp_name:
@@ -1142,15 +1224,19 @@ def validate_kb_complications_v2(kb: dict[str, Any]) -> list[str]:
                 errors.append(f"rare_critical_red_flags[{idx}] invalid reversibility: {reversibility!r}")
 
             max_raw = entry.get("frequency_max_num")
-            if isinstance(max_raw, bool) or not isinstance(max_raw, (int, float)):
-                errors.append(f"rare_critical_red_flags[{idx}] frequency_max_num must be numeric")
+            if (
+                isinstance(max_raw, bool)
+                or not isinstance(max_raw, (int, float))
+                or not math.isfinite(float(max_raw))
+            ):
+                errors.append(f"rare_critical_red_flags[{idx}] frequency_max_num must be a finite number")
             elif float(max_raw) >= 1.0 or float(max_raw) < 0.0:
                 errors.append(
                     f"rare_critical_red_flags[{idx}] frequency_max_num must be in [0.0, 1.0), got {max_raw}"
                 )
 
             pmids = entry.get("evidence_pmids")
-            if not isinstance(pmids, list) or not any(str(p).strip() for p in pmids):
+            if not isinstance(pmids, list) or not any(p is not None and str(p).strip() for p in pmids):
                 errors.append(f"rare_critical_red_flags[{idx}] evidence_pmids must be a non-empty list")
 
     return errors

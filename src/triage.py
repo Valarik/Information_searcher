@@ -34,6 +34,7 @@ truststore.inject_into_ssl()
 import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from src.extractor_common import validate_nosology_id
 from src.schema import init_db
 
 SKILLS_ROOT = Path.home() / ".gemini" / "config" / "plugins" / "science" / "skills"
@@ -184,7 +185,6 @@ BASIC_SCIENCE_MARKERS = (
     "animal model",
     "mouse",
     "mice",
-    "rat ",
     "cadaver",
     "scrna-seq",
     "single-cell",
@@ -192,11 +192,16 @@ BASIC_SCIENCE_MARKERS = (
     "gwas",
 )
 
-CLINICAL_SAMPLE_SIZE_PATTERNS = (
-    r"\b(\d[\d,]{0,6})\s+(?:consecutive\s+)?(?:patients?|subjects?|participants?|individuals?|cases?|wom[ae]n|pregnanc(?:y|ies)|deliver(?:y|ies)|mothers?|adults?|child(?:ren)?)\b",
+EXPLICIT_COHORT_SAMPLE_SIZE_PATTERNS = (
     r"\b(?:n|N)\s*=\s*(\d[\d,]{0,6})\b",
     r"\b(?:cohort|series|total|study|review)\s+of\s+(\d[\d,]{0,6})\b",
-    r"\b(\d[\d,]{0,6})\s+(?:consecutive\s+)?(?:hands?|digits?|fingers?|thumbs?|rays?|joints?|pulleys?|tendons?|trigger\s+fingers?|trigger\s+digits?|trigger\s+thumbs?|wrists?|elbows?|shoulders?|knees?|hips?|ankles?|procedures?|operations?|releases?|interventions?)\b",
+    r"\b(\d[\d,]{0,6})\s+consecutive\s+(?:patients?|subjects?|participants?|individuals?|cases?|hands?|digits?|fingers?|thumbs?|rays?|joints?|pulleys?|tendons?|procedures?|operations?|releases?|interventions?)\b",
+)
+
+CLINICAL_SAMPLE_SIZE_PATTERNS = (
+    *EXPLICIT_COHORT_SAMPLE_SIZE_PATTERNS,
+    r"\b(\d[\d,]{0,6})\s+(?:patients?|subjects?|participants?|individuals?|cases?|wom[ae]n|pregnanc(?:y|ies)|deliver(?:y|ies)|mothers?|adults?|child(?:ren)?)\b",
+    r"\b(\d[\d,]{0,6})\s+(?:hands?|digits?|fingers?|thumbs?|rays?|joints?|pulleys?|tendons?|trigger\s+fingers?|trigger\s+digits?|trigger\s+thumbs?|wrists?|elbows?|shoulders?|knees?|hips?|ankles?)\b",
 )
 
 
@@ -253,12 +258,15 @@ def should_tag_complications_safety(
     return False
 
 
-def _extract_clinical_sample_size(text: str) -> int | None:
+def _extract_clinical_sample_size(
+    text: str,
+    patterns: tuple[str, ...] = CLINICAL_SAMPLE_SIZE_PATTERNS,
+) -> int | None:
     """Extract maximum clinical patient/joint/digit sample size while filtering calendar years."""
     if not text:
         return None
     max_n: int | None = None
-    for pat in CLINICAL_SAMPLE_SIZE_PATTERNS:
+    for pat in patterns:
         for m in re.finditer(pat, text, flags=re.IGNORECASE):
             val_str = m.group(1).replace(",", "")
             if val_str.isdigit():
@@ -270,9 +278,11 @@ def _extract_clinical_sample_size(text: str) -> int | None:
 
 
 def _is_basic_science_study(text: str) -> bool:
-    """Return True for in vitro / ex vivo / animal / cadaver / omics studies."""
+    """Return True for in vitro / ex vivo / animal / cadaver / omics studies (IN-05)."""
     low = (text or "").lower()
-    return any(marker in low for marker in BASIC_SCIENCE_MARKERS)
+    if any(marker in low for marker in BASIC_SCIENCE_MARKERS):
+        return True
+    return bool(re.search(r"\brats?\b", low))
 
 
 def get_uv_bin() -> str:
@@ -445,13 +455,8 @@ def classify_evidence_tier(
             updated_types.append("Narrative Review [D-06]")
         return 3, updated_types
 
-    # If abstract is completely missing and not Tier 1, place in Tier 4 (D-05)
+    # If abstract is completely missing and not Tier 1, place in Tier 4 (D-05, IN-01)
     if not abstract or len(abstract.strip()) < 60:
-        return 4, updated_types
-
-    # D-04: Two-contour separation — small clinical series (1 <= N < 20) go to Tier 4 casuistry
-    eff_n = _extract_clinical_sample_size(combined)
-    if eff_n is not None and 1 <= eff_n < 20 and not _is_basic_science_study(combined):
         _append_tier4_comp_markers()
         return 4, updated_types
 
@@ -492,7 +497,28 @@ def classify_evidence_tier(
         "epigenom",
         "methylation array",
     )
-    if any(m in pt_lower for m in tier2_pt_markers) or any(m in combined for m in tier2_text_markers):
+    large_design_tier2 = (
+        any(m in pt_lower for m in ("multicenter study", "clinical trial, phase ii", "clinical trial, phase iii", "clinical trial, phase iv"))
+        or any(m in combined for m in ("multicenter", "multi-center", "national registry", "population-based", "uk biobank", "finngen"))
+    )
+    is_tier2 = any(m in pt_lower for m in tier2_pt_markers) or any(m in combined for m in tier2_text_markers)
+
+    # D-04 & WR-01: Two-contour separation — demote genuine small clinical series (1 <= N < 20) to Tier 4 casuistry
+    # without misclassifying multicenter/prospective cohorts due to arm counts ('2 procedures') or event numerators ('1 patient had...').
+    if not _is_basic_science_study(combined):
+        if is_tier2:
+            if not large_design_tier2:
+                explicit_n = _extract_clinical_sample_size(combined, patterns=EXPLICIT_COHORT_SAMPLE_SIZE_PATTERNS)
+                if explicit_n is not None and 1 <= explicit_n < 20:
+                    _append_tier4_comp_markers()
+                    return 4, updated_types
+        else:
+            eff_n = _extract_clinical_sample_size(combined)
+            if eff_n is not None and 1 <= eff_n < 20:
+                _append_tier4_comp_markers()
+                return 4, updated_types
+
+    if is_tier2:
         return 2, updated_types
 
     # Default for remaining original clinical series and in vitro/ex vivo studies: Tier 3
@@ -854,7 +880,7 @@ def generate_prisma_report(
             f"- **Нарративных обзоров в Tier 3 (`D-06`, используются только для проверки полноты ссылок):** {narrative_reviews_cnt}",
             f"- **Клинических случаев редких осложнений в Tier 4 (`D-04`/`D-05`):** {rare_comp_cnt}",
             "",
-            "## 3. Распределение по 5 тематическим кластерам",
+            f"## 3. Распределение по тематическим кластерам ({len(cluster_stats)})",
             "",
             "| Кластер | Название кластера | Всего статей | Ядро доказательности (Tier 1–2) | Доступно Full-Text XML |",
             "|---------|-------------------|-------------:|--------------------------------:|-----------------------:|",
@@ -904,8 +930,8 @@ def main() -> None:
 
     cfg_path = Path(args.config)
     cfg = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
-    meta = cfg.get("nosology") or {}
-    nosology_id = cfg.get("nosology_id") or meta.get("id") or cfg_path.stem
+    meta = cfg.get("nosology") if isinstance(cfg.get("nosology"), dict) else {}
+    nosology_id = validate_nosology_id(cfg.get("nosology_id") or meta.get("id") or cfg_path.stem)
     date_range = cfg.get("date_range") or {}
     start_year = int(date_range.get("start_year") or 2016)
     end_year = int(date_range.get("end_year") or 2026)
@@ -918,11 +944,15 @@ def main() -> None:
     )
     comp_terms = (triage_rules or {}).get("complication_terms") or ()
 
-    data_dir = Path("data") / nosology_id
+    base_data = Path("data").resolve()
+    base_reports = Path("reports").resolve()
+    data_dir = (base_data / nosology_id).resolve()
+    report_path = (base_reports / nosology_id / "prisma_stats.md").resolve()
+    if not data_dir.is_relative_to(base_data) or not report_path.is_relative_to(base_reports):
+        raise ValueError(f"Path traversal blocked for nosology_id={nosology_id!r}")
     raw_dir = data_dir / "raw"
     fulltext_dir = raw_dir / "fulltext_xml"
     db_path = data_dir / "literature.db"
-    report_path = Path("reports") / nosology_id / "prisma_stats.md"
 
     conn = init_db(db_path)
     cur = conn.cursor()

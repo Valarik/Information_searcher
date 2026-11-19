@@ -1377,13 +1377,269 @@ def test_v1_backward_compat_prom_metroplasty_trigger_finger_readonly() -> None:
         assert wal_path.exists() == wal_before
         assert shm_path.exists() == shm_before
 
-    # Git working tree confirms zero mutations anywhere in data/ or reports/
+    # Git working tree confirms zero mutations in the 3 frozen v1.x corpora (WR-09)
     git_res = subprocess.run(
-        ["git", "status", "--porcelain", "data/", "reports/"],
+        [
+            "git",
+            "status",
+            "--porcelain",
+            "data/prom",
+            "data/metroplasty_pregnancy",
+            "data/trigger_finger",
+            "reports/prom",
+            "reports/metroplasty_pregnancy",
+            "reports/trigger_finger",
+        ],
         cwd=PROJECT_ROOT,
         check=True,
         capture_output=True,
         text=True,
     )
     assert git_res.stdout.strip() == ""
+
+
+# =============================================================================
+# Code Review Regression Tests (CR-01..CR-05, WR-01..WR-08, IN-01..IN-05)
+# =============================================================================
+
+
+def test_code_review_regressions_security_and_clinical_parsers(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Regression suite locking fixes for CR-01..CR-05 and WR-01..WR-08 from 17-REVIEW.md."""
+    # CR-01: nosology_id path traversal blocked in validate_nosology_id & discover_nosologies
+    with pytest.raises(ValueError):
+        extractor_common.validate_nosology_id("../../outside")
+    with pytest.raises(ValueError):
+        extractor_common.validate_nosology_id("bad-id")
+    bad_cfg_dir = tmp_path / "configs_bad"
+    bad_cfg_dir.mkdir()
+    (bad_cfg_dir / "evil.yaml").write_text("nosology_id: '../../escape'\n", encoding="utf-8")
+    (bad_cfg_dir / "good.yaml").write_text(
+        "nosology_id: clean_nosology\nsurgical_focus: true\nnosology:\n  surgical_focus: false\n",
+        encoding="utf-8",
+    )
+    discovered = universal_schema.discover_nosologies(configs_dir=bad_cfg_dir)
+    assert [d["id"] for d in discovered] == ["clean_nosology"]
+    # WR-08: top-level surgical_focus: true overrides nested nosology.surgical_focus: false
+    assert discovered[0]["surgical_focus"] is True
+    assert discovered[0]["treatment_profile"] == "surgical"
+    assert harvester.resolve_treatment_profile({"surgical_focus": True, "nosology": {"surgical_focus": False}}) == "surgical"
+
+    # CR-02: _connect_sqlite_readonly percent-encodes '#' paths and enforces PRAGMA query_only=ON
+    hash_dir = tmp_path / "proj#1_dir"
+    hash_dir.mkdir()
+    hash_db = hash_dir / "test.db"
+    wconn = schema.init_db(hash_db)
+    wconn.close()
+    rconn = universal_schema._connect_sqlite_readonly(hash_db)
+    try:
+        with pytest.raises(sqlite3.OperationalError):
+            rconn.execute("CREATE TABLE should_fail (id INT)")
+    finally:
+        rconn.close()
+
+    # CR-03: harvest_pubmed_complications raises on efetch/esummary error dict and never poisons cache
+    raw_err_dir = tmp_path / "raw_err"
+    err_conn = schema.init_db(tmp_path / "err.db")
+
+    class _ErrPubMedMod:
+        def search_pubmed(self, query, max_results=800, sort_by="relevance"):
+            return ["12345678"]
+
+        def fetch_article_abstracts(self, pmids):
+            return {"error": "HTTP 429 Too Many Requests", "endpoint": "efetch"}
+
+        def fetch_database_summary(self, db, pmids):
+            return []
+
+    monkeypatch.setattr(harvester, "load_skill_module", lambda name, path: _ErrPubMedMod())
+    with pytest.raises(RuntimeError, match="efetch error"):
+        harvester.harvest_pubmed_complications("q", raw_err_dir, err_conn)
+    assert not (raw_err_dir / "pubmed_complications.json").exists()
+    err_conn.close()
+
+    # CR-04: CTCAE version numbers (4.0, 5.0, 3.0) are NOT misclassified as Grade IV/V/IIIa
+    assert extractor_common.extract_clavien_dindo_grade("Toxicities were assessed using NCI-CTCAE 5.0.") == (None, None)
+    assert extractor_common.extract_clavien_dindo_grade("Adverse events were graded according to CTCAE 4.0 criteria.") == (None, None)
+    assert extractor_common.extract_clavien_dindo_grade("Adverse events graded by CTCAE 3.0.") == (None, None)
+    assert extractor_common.extract_clavien_dindo_grade("NCI-CTCAE v5.0 Grade 2 dermatitis observed.") == ("II", "Grade 2")
+    with pytest.raises(ValueError):
+        extractor_common.normalize_clavien_dindo("CTCAE 5.0")
+    assert extractor_common.normalize_clavien_dindo(ctcae_grade="CTCAE-3") == ("IIIa", "Grade 3")
+
+    # CR-05: validate_kb_complications_v2 catches NaN, >100%, empty modality, and [None] PMIDs without crashing
+    bad_kb = {
+        "schema_version": "2.0",
+        "frequent_complications": [
+            {
+                "modality": "",
+                "complication_name": "Wound infection",
+                "event_class": "true_complication",
+                "clavien_dindo_grade": "II",
+                "reversibility": "requires_conservative_therapy",
+                "frequency_pct": "250%",
+                "frequency_median_num": float("nan"),
+                "sample_size_total": float("nan"),
+                "time_window": "14 days",
+                "anatomical_substrate": "Skin",
+                "prevention_and_management": "Antibiotics",
+                "evidence_pmids": [None],
+            },
+            {
+                "modality": "Open",
+                "complication_name": "Scar pain",
+                "event_class": "true_complication",
+                "clavien_dindo_grade": "I",
+                "reversibility": "transient_self_limiting",
+                "frequency_pct": "150%",
+                "frequency_median_num": 150.0,
+                "sample_size_total": 50,
+                "time_window": "3 months",
+                "anatomical_substrate": "Scar",
+                "prevention_and_management": "Massage",
+                "evidence_pmids": ["11111"],
+            },
+        ],
+        "rare_critical_red_flags": [
+            {
+                "modality": "",
+                "complication_name": "Nerve injury",
+                "clavien_dindo_grade": "IIIb",
+                "reversibility": "permanent_deficit",
+                "frequency_pct": "0.2%",
+                "frequency_max_num": float("nan"),
+                "anatomical_substrate": "Digital nerve",
+                "prevention_and_management": "Microsurgical repair",
+                "evidence_pmids": [None],
+            }
+        ],
+    }
+    v2_errs = universal_schema.validate_kb_complications_v2(bad_kb)
+    assert any("empty modality" in e for e in v2_errs)
+    assert any("finite" in e for e in v2_errs)
+    assert any("<= 100.0" in e for e in v2_errs)
+    assert any("evidence_pmids" in e for e in v2_errs)
+
+    # WR-01 & IN-05: Multicenter / prospective cohorts not demoted by arm counts or event numerators; plural rats recognized
+    tier_mc, types_mc = triage.classify_evidence_tier(
+        "Comparison of 2 procedures across 4 hospitals at 5-year follow-up",
+        "A multicenter comparative study evaluated 2 procedures for trigger finger release across four centers with long-term functional outcomes.",
+        ["Multicenter Study", "Comparative Study"],
+    )
+    assert tier_mc == 2 and "rare_catastrophic_case" not in types_mc
+    tier_obs, types_obs = triage.classify_evidence_tier(
+        "Prospective cohort outcomes after A1 pulley release",
+        "Prospective study of consecutive adult patients. Two patients developed superficial wound infection and 1 patient had transient paresthesia.",
+        ["Observational Study"],
+    )
+    assert tier_obs == 2 and "rare_catastrophic_case" not in types_obs
+    assert triage._is_basic_science_study("Tendon healing assessed in 12 Wistar rats.") is True
+
+    # WR-02: AMA/JAMA comma-delimited 95% CI ignored, real rate preserved
+    assert extractor_common.extract_complication_frequency("Rate was 12.5%, 95% CI, 8.1–17.2%") == ("12.5%", 12.5, None)
+    assert extractor_common.extract_complication_frequency("Wound infection 95% CI, 10.2–28.1%") == (None, None, None)
+    assert extractor_common.extract_complication_frequency("95% CI 10.2% to 28.1%") == (None, None, None)
+
+    # WR-05: String '0'/'false' for is_rare_casuistry is False; negative/over-100 frequency rejected
+    conn_wr5 = schema.init_db(tmp_path / "wr5.db")
+    try:
+        rid = extractor_common.insert_extracted_complication(
+            conn_wr5,
+            {
+                "evidence_tier": 2,
+                "modality": "Open release",
+                "complication_name": "Superficial wound infection",
+                "event_class": "true_complication",
+                "clavien_dindo_grade": "II",
+                "frequency_num": 2.5,
+                "reversibility": "requires_conservative_therapy",
+                "sample_size": 100,
+                "is_rare_casuistry": "false",
+                "pmid": "99001122",
+            },
+        )
+        assert rid is not None
+        saved_cas = conn_wr5.execute("SELECT is_rare_casuistry FROM extracted_complications WHERE id = ?", (rid,)).fetchone()[0]
+        assert saved_cas == 0
+        with pytest.raises(ValueError):
+            extractor_common.insert_extracted_complication(
+                conn_wr5,
+                {
+                    "modality": "Open release",
+                    "complication_name": "Wound dehiscence",
+                    "clavien_dindo_grade": "I",
+                    "frequency_num": 150.0,
+                    "reversibility": "transient_self_limiting",
+                    "sample_size": 40,
+                },
+            )
+    finally:
+        conn_wr5.close()
+
+    # WR-06: Partial iatrogenic nerve/tendon injury is NOT rejected as incomplete release
+    assert extractor_common.is_excluded_recurrence_event("Incomplete transection of radial digital nerve") is False
+    assert extractor_common.is_excluded_recurrence_event("Incomplete division of flexor tendon") is False
+    assert extractor_common.is_excluded_recurrence_event("Incomplete release of A1 pulley") is True
+
+    # WR-07: JATS 'Patient Safety and Postoperative Complications' routed to results_text, not methods_text
+    jats_path = tmp_path / "patient_safety.xml"
+    jats_path.write_text(
+        "<article><front><article-meta><title-group><article-title>Postoperative Outcomes</article-title></title-group></article-meta></front>"
+        "<body><sec><title>Patient Safety and Postoperative Complications</title>"
+        "<p>Transient digital paresthesia occurred in 4/80 (5.0%) patients and resolved spontaneously within 3 months.</p></sec></body></article>",
+        encoding="utf-8",
+    )
+    parsed_jats = extractor_common.parse_jats_xml(jats_path)
+    assert "paresthesia" in parsed_jats["results_text"]
+    assert parsed_jats["methods_text"] == ""
+
+    # WR-03: COALESCE(c.evidence_tier, a.evidence_tier) and COALESCE(c.pmid, a.pmid) preserve article-linked rows
+    wr3_db = tmp_path / "wr3.db"
+    c3 = schema.init_db(wr3_db)
+    try:
+        c3.execute(
+            "INSERT INTO articles (pmid, title, prisma_status, evidence_tier) VALUES (?, ?, 'included', 2)",
+            ("88888888", "Cohort study of surgical complications"),
+        )
+        art_id = c3.execute("SELECT id FROM articles WHERE pmid = '88888888'").fetchone()[0]
+        extractor_common.insert_extracted_complication(
+            c3,
+            {
+                "article_id": art_id,
+                "modality": "Open release",
+                "complication_name": "Scar tenderness",
+                "event_class": "transient_postop_sequela",
+                "clavien_dindo_grade": "I",
+                "frequency_num": 8.0,
+                "reversibility": "transient_self_limiting",
+                "time_window": "3–6 months",
+                "sample_size": 120,
+            },
+        )
+    finally:
+        c3.close()
+    freq_wr3, _ = universal_schema.aggregate_complications_from_sqlite(wr3_db)
+    assert len(freq_wr3) == 1
+    assert freq_wr3[0]["evidence_pmids"] == ["88888888"]
+
+    # WR-04: save_new_nosology_config preserves caller input, keeps pubmed_max_results, strips empty complications_queries
+    monkeypatch.setattr(universal_schema, "CONFIGS_DIR", tmp_path / "cfg_wr4")
+    caller_payload = {
+        "nosology_id": "wr4_test",
+        "nosology": None,
+        "complications_queries": {"pubmed": "", "europepmc": ""},
+    }
+    saved_p = universal_schema.save_new_nosology_config(caller_payload)
+    assert caller_payload["nosology"] is None  # not mutated in place
+    loaded_wr4 = yaml.safe_load(saved_p.read_text(encoding="utf-8"))
+    assert "complications_queries" not in loaded_wr4
+    saved_p2 = universal_schema.save_new_nosology_config(
+        {
+            "nosology_id": "wr4_limits",
+            "complications_queries": {"pubmed": "q", "pubmed_max_results": 250, "europepmc_max_results": 300},
+        }
+    )
+    loaded_wr4_2 = yaml.safe_load(saved_p2.read_text(encoding="utf-8"))
+    assert loaded_wr4_2["complications_queries"]["pubmed_max_results"] == 250
+    assert loaded_wr4_2["complications_queries"]["europepmc_max_results"] == 300
+
 
