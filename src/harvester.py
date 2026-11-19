@@ -43,6 +43,103 @@ EPMC_SCRIPT = SKILLS_ROOT / "literature_search_europepmc" / "scripts" / "europep
 OPENALEX_SCRIPT = SKILLS_ROOT / "literature_search_openalex" / "scripts" / "openalex_cli.py"
 CT_SCRIPT = SKILLS_ROOT / "clinical_trials_database" / "scripts" / "clinical_trials_api.py"
 
+SURGICAL_PUBMED_COMP_BLOCK = (
+    '("Postoperative Complications"[MeSH] OR "Intraoperative Complications"[MeSH] '
+    'OR "Iatrogenic Disease"[MeSH] OR "iatrogenic"[tiab] OR "complication rate"[tiab] '
+    'OR "adverse effects"[Subheading] OR "complications"[Subheading] '
+    'OR "Clavien-Dindo"[tiab] OR "nerve injury"[tiab] OR "surgical site infection"[tiab] '
+    'OR "reoperation"[tiab])'
+)
+
+SURGICAL_EPMC_COMP_BLOCK = (
+    '("postoperative complications" OR "intraoperative complications" OR "iatrogenic" '
+    'OR "complication rate" OR "Clavien-Dindo" OR "surgical complication" '
+    'OR "adverse effects" OR "nerve injury" OR "reoperation")'
+)
+
+CONSERVATIVE_PUBMED_COMP_BLOCK = (
+    '("Drug-Related Side Effects and Adverse Reactions"[MeSH] OR "adverse effects"[Subheading] '
+    'OR "toxicity"[Subheading] OR "adverse events"[tiab] OR "drug-related side effects"[tiab] '
+    'OR "side effects"[tiab] OR "treatment-related adverse"[tiab] OR "CTCAE"[tiab])'
+)
+
+CONSERVATIVE_EPMC_COMP_BLOCK = (
+    '("adverse effects" OR "drug-related side effects" OR "adverse events" '
+    'OR "side effects" OR "toxicity" OR "CTCAE" OR "treatment-emergent adverse")'
+)
+
+
+def resolve_treatment_profile(cfg: dict[str, Any]) -> str:
+    """Return 'conservative' only when explicitly configured; default to 'surgical' (D-01)."""
+    cfg = cfg or {}
+    meta = cfg.get("nosology") or {}
+    profile = str(cfg.get("treatment_profile") or meta.get("treatment_profile") or "").strip().lower()
+    if profile == "conservative":
+        return "conservative"
+    if "surgical_focus" in cfg and cfg["surgical_focus"] is False:
+        return "conservative"
+    if "surgical_focus" in meta and meta["surgical_focus"] is False:
+        return "conservative"
+    return "surgical"
+
+
+def build_complications_queries(cfg: dict[str, Any]) -> dict[str, Any]:
+    """Return explicit or auto-generated PubMed & Europe PMC complication queries (COMP-01, D-01, D-02)."""
+    cfg = cfg or {}
+    meta = cfg.get("nosology") or {}
+    explicit = cfg.get("complications_queries") or meta.get("complications_queries") or {}
+    if not isinstance(explicit, dict):
+        explicit = {}
+
+    profile = resolve_treatment_profile(cfg)
+    date_range = cfg.get("date_range") or {}
+    start_year = int(date_range.get("start_year") or 2016)
+    end_year = int(date_range.get("end_year") or 2026)
+    start_date = str(date_range.get("start_date") or f"{start_year}-01-01")
+    end_date = str(date_range.get("end_date") or f"{end_year}-12-31")
+
+    mesh_terms = cfg.get("mesh_terms") or meta.get("mesh_terms") or []
+    core_terms = ((cfg.get("triage_rules") or {}).get("core_terms") or [])[:8]
+    fallback_name = cfg.get("name_en") or meta.get("name_en") or cfg.get("nosology_id") or meta.get("id") or ""
+
+    pm_disease_parts = [f'"{m}"[MeSH]' for m in mesh_terms if m] + [f'"{t}"[tiab]' for t in core_terms if t]
+    if not pm_disease_parts and fallback_name:
+        pm_disease_parts = [f'"{fallback_name}"[tiab]']
+
+    epmc_disease_parts = [f'"{t}"' for t in (core_terms or mesh_terms) if t]
+    if not epmc_disease_parts and fallback_name:
+        epmc_disease_parts = [f'"{fallback_name}"']
+
+    pm_comp = SURGICAL_PUBMED_COMP_BLOCK if profile == "surgical" else CONSERVATIVE_PUBMED_COMP_BLOCK
+    epmc_comp = SURGICAL_EPMC_COMP_BLOCK if profile == "surgical" else CONSERVATIVE_EPMC_COMP_BLOCK
+
+    pm_date_clause = (
+        f'("{start_date.replace("-", "/")}"[Date - Publication] : '
+        f'"{end_date.replace("-", "/")}"[Date - Publication])'
+    )
+    if pm_disease_parts:
+        auto_pubmed = f"(({' OR '.join(pm_disease_parts)}) AND {pm_comp}) AND {pm_date_clause}"
+    else:
+        auto_pubmed = f"{pm_comp} AND {pm_date_clause}"
+
+    epmc_date_clause = f"(FIRST_PDATE:[{start_date} TO {end_date}])"
+    if epmc_disease_parts:
+        auto_epmc = f"(({' OR '.join(epmc_disease_parts)}) AND {epmc_comp}) AND {epmc_date_clause}"
+    else:
+        auto_epmc = f"{epmc_comp} AND {epmc_date_clause}"
+
+    return {
+        "profile": profile,
+        "surgical_focus": profile != "conservative",
+        "pubmed": (explicit.get("pubmed") or "").strip() or auto_pubmed,
+        "europepmc": (explicit.get("europepmc") or "").strip() or auto_epmc,
+        "pubmed_max_results": int(explicit.get("pubmed_max_results") or explicit.get("max_results") or 800),
+        "europepmc_max_results": int(explicit.get("europepmc_max_results") or explicit.get("max_results") or 1000),
+    }
+
+
+resolve_complications_queries = build_complications_queries
+
 
 def load_skill_module(name: str, script_path: Path):
     spec = importlib.util.spec_from_file_location(name, str(script_path))
@@ -614,6 +711,203 @@ def harvest_clinical_trials(uv_bin: str, condition: str, raw_dir: Path, conn: sq
     return count
 
 
+def harvest_pubmed_complications(
+    query: str,
+    raw_dir: Path,
+    conn: sqlite3.Connection,
+    *,
+    profile: str = "surgical",
+    max_results: int = 800,
+) -> int:
+    """Harvest targeted treatment-complications pass from PubMed with dedicated cache (D-03, T-17-03)."""
+    print(f"[5/6] Harvesting PubMed:Complications (profile={profile}, max={max_results})...", flush=True)
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    cache_file = raw_dir / "pubmed_complications.json"
+
+    if cache_file.exists():
+        cached = json.loads(cache_file.read_text(encoding="utf-8"))
+        if isinstance(cached, dict):
+            pmids = [str(p).strip() for p in (cached.get("pmids") or []) if str(p).strip()]
+            records = cached.get("records") or []
+        elif isinstance(cached, list):
+            pmids = [str(r.get("pmid")).strip() for r in cached if isinstance(r, dict) and r.get("pmid")]
+            records = cached
+        else:
+            pmids, records = [], []
+        print(f"  -> Loaded {len(records)} cached PubMed:Complications records from {cache_file.name}.", flush=True)
+    else:
+        pubmed_mod = load_skill_module("pubmed_api", PUBMED_SCRIPT)
+        pmids_res = pubmed_mod.search_pubmed(query, max_results=max_results, sort_by="relevance")
+        if isinstance(pmids_res, dict) and "error" in pmids_res:
+            raise RuntimeError(f"PubMed complications search error: {pmids_res}")
+        pmids = [str(p).strip() for p in (pmids_res or []) if str(p).strip()]
+        print(f"  -> Found {len(pmids)} PMIDs in PubMed:Complications.", flush=True)
+
+        records: list[dict[str, Any]] = []
+        batch_size = 180
+        total_batches = (len(pmids) + batch_size - 1) // batch_size
+
+        for b_idx in range(total_batches):
+            batch = pmids[b_idx * batch_size : (b_idx + 1) * batch_size]
+            print(
+                f"  -> Fetching PubMed:Complications batch {b_idx + 1}/{total_batches} ({len(batch)} PMIDs)...",
+                flush=True,
+            )
+            abs_list = pubmed_mod.fetch_article_abstracts(batch)
+            sum_list = pubmed_mod.fetch_database_summary("pubmed", batch)
+
+            sum_by_uid: dict[str, dict[str, Any]] = {}
+            if isinstance(sum_list, list):
+                for s in sum_list:
+                    if isinstance(s, dict) and s.get("uid"):
+                        sum_by_uid[str(s["uid"])] = s
+
+            if isinstance(abs_list, list):
+                for item in abs_list:
+                    if not isinstance(item, dict):
+                        continue
+                    pmid = str(item.get("pmid") or "").strip()
+                    if not pmid:
+                        continue
+                    s_info = sum_by_uid.get(pmid, {})
+                    pub_types = s_info.get("pubtype") or []
+                    langs = s_info.get("lang") or ["eng"]
+                    lang = langs[0] if isinstance(langs, list) and langs else "eng"
+                    pmcid = None
+                    doi = item.get("doi")
+                    for aid in s_info.get("articleids") or []:
+                        if isinstance(aid, dict):
+                            if aid.get("idtype") == "pmc" and aid.get("value"):
+                                val = str(aid["value"]).strip()
+                                pmcid = val if val.startswith("PMC") else f"PMC{val}"
+                            elif aid.get("idtype") == "doi" and not doi:
+                                doi = aid.get("value")
+
+                    pubdate = item.get("pubdate") or s_info.get("pubdate") or ""
+                    pub_year = extract_year(pubdate)
+
+                    records.append(
+                        {
+                            "pmid": pmid,
+                            "pmcid": pmcid,
+                            "doi": doi,
+                            "title": item.get("title") or s_info.get("title") or "",
+                            "abstract": item.get("abstract"),
+                            "journal": item.get("journal") or s_info.get("fulljournalname") or s_info.get("source"),
+                            "pub_year": pub_year,
+                            "pub_date": pubdate,
+                            "authors": item.get("authors") or [],
+                            "language": lang,
+                            "pub_types": pub_types,
+                            "is_preprint": "Preprint" in pub_types,
+                            "is_open_access": bool(pmcid),
+                            "sources": ["PubMed:Complications"],
+                        }
+                    )
+
+        payload = {
+            "query": query,
+            "profile": profile,
+            "pmids": pmids,
+            "records": records,
+        }
+        cache_file.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    for rec in records:
+        if not isinstance(rec, dict):
+            continue
+        merged_rec = dict(rec)
+        merged_rec["sources"] = ["PubMed:Complications"]
+        upsert_article(conn, merged_rec)
+
+    conn.commit()
+    return len(pmids) if pmids else len(records)
+
+
+def harvest_europepmc_complications(
+    query: str,
+    raw_dir: Path,
+    conn: sqlite3.Connection,
+    *,
+    profile: str = "surgical",
+    max_results: int = 1000,
+) -> int:
+    """Harvest targeted treatment-complications pass from Europe PMC with dedicated cache (D-03, T-17-03)."""
+    print(f"[6/6] Harvesting EuropePMC:Complications (profile={profile}, max={max_results})...", flush=True)
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    cache_file = raw_dir / "europepmc_complications.json"
+
+    if cache_file.exists():
+        data = json.loads(cache_file.read_text(encoding="utf-8"))
+        print(f"  -> Loaded cached EuropePMC:Complications from {cache_file.name}.", flush=True)
+    else:
+        epmc_mod = load_skill_module("europepmc_api", EPMC_SCRIPT)
+        res_data = epmc_mod.search(
+            query=query,
+            max_results=max_results,
+            result_type="core",
+            cursor="*",
+        )
+        res_dict = res_data if isinstance(res_data, dict) else {}
+        data = {
+            "query": query,
+            "profile": profile,
+            "hitCount": res_dict.get("hitCount", 0),
+            "results": res_dict.get("results") or [],
+        }
+        cache_file.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    results = data.get("results") or [] if isinstance(data, dict) else []
+    for r in results:
+        if not isinstance(r, dict):
+            continue
+        pmid = str(r.get("pmid") or "").strip() or None
+        pmcid = str(r.get("pmcid") or "").strip() or None
+        doi = r.get("doi")
+        title = r.get("title") or ""
+        abstract = r.get("abstractText")
+        journal_info = r.get("journalInfo") or {}
+        journal_obj = journal_info.get("journal") or {}
+        book_details = r.get("bookOrReportDetails") or {}
+        journal = journal_obj.get("title") or r.get("journalTitle") or book_details.get("publisher")
+        pub_year = extract_year(r.get("pubYear") or r.get("firstPublicationDate"))
+        pub_date = r.get("firstPublicationDate") or str(r.get("pubYear") or "")
+        author_str = r.get("authorString") or ""
+        authors = [a.strip() for a in author_str.split(",") if a.strip()]
+        lang = r.get("language") or "eng"
+        pt_list = (r.get("pubTypeList") or {}).get("pubType") or []
+        if isinstance(pt_list, str):
+            pt_list = [pt_list]
+        is_preprint = (r.get("source") == "PPR") or any("preprint" in str(t).lower() for t in pt_list)
+        cited_by = int(r.get("citedByCount") or 0)
+        is_oa = r.get("isOpenAccess") == "Y" or bool(pmcid)
+
+        upsert_article(
+            conn,
+            {
+                "pmid": pmid,
+                "pmcid": pmcid,
+                "doi": doi,
+                "title": title,
+                "abstract": abstract,
+                "journal": journal,
+                "pub_year": pub_year,
+                "pub_date": pub_date,
+                "authors": authors,
+                "language": lang,
+                "pub_types": pt_list,
+                "is_preprint": is_preprint,
+                "cited_by_count": cited_by,
+                "is_open_access": is_oa,
+                "sources": ["EuropePMC:Complications"],
+            },
+        )
+
+    conn.commit()
+    print(f"  -> Processed {len(results)} records from EuropePMC:Complications.", flush=True)
+    return len(results)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Universal nosology literature harvester (2016-2026).")
     parser.add_argument(
@@ -629,10 +923,10 @@ def main() -> None:
         print(f"Error: Config file not found: {cfg_path}", file=sys.stderr)
         sys.exit(1)
 
-    cfg = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
-    nosology_id = cfg["nosology_id"]
-    queries = cfg["queries"]
-    date_range = cfg["date_range"]
+    cfg = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+    nosology_id = cfg.get("nosology_id") or (cfg.get("nosology") or {}).get("id") or cfg_path.stem
+    queries = cfg.get("queries") or {}
+    date_range = cfg.get("date_range") or {}
 
     data_dir = Path("data") / nosology_id
     raw_dir = data_dir / "raw"
@@ -654,16 +948,41 @@ def main() -> None:
     )
     n_ct = harvest_clinical_trials(uv_bin, queries["clinical_trials_condition"], raw_dir, conn)
 
+    comp_q = build_complications_queries(cfg)
+    n_pm_comp = harvest_pubmed_complications(
+        comp_q["pubmed"],
+        raw_dir,
+        conn,
+        profile=comp_q["profile"],
+        max_results=comp_q["pubmed_max_results"],
+    )
+    n_epmc_comp = harvest_europepmc_complications(
+        comp_q["europepmc"],
+        raw_dir,
+        conn,
+        profile=comp_q["profile"],
+        max_results=comp_q["europepmc_max_results"],
+    )
+
     cur = conn.cursor()
     unique_articles = cur.execute("SELECT COUNT(*) FROM articles").fetchone()[0]
     unique_trials = cur.execute("SELECT COUNT(*) FROM clinical_trials").fetchone()[0]
     preprints = cur.execute("SELECT COUNT(*) FROM articles WHERE is_preprint = 1").fetchone()[0]
     oa_count = cur.execute("SELECT COUNT(*) FROM articles WHERE is_open_access = 1").fetchone()[0]
+    comp_articles = cur.execute(
+        "SELECT COUNT(*) FROM articles WHERE sources LIKE ?",
+        ("%:Complications%",),
+    ).fetchone()[0]
 
     print("\n=== HARVEST SUMMARY ===", flush=True)
     print(f"Raw records processed -> PubMed: {n_pubmed} | EuropePMC: {n_epmc} | OpenAlex: {n_oa} | ClinicalTrials: {n_ct}", flush=True)
+    print(
+        f"Complications pass    -> PubMed:Complications: {n_pm_comp} | EuropePMC:Complications: {n_epmc_comp} (profile={comp_q['profile']})",
+        flush=True,
+    )
     print(f"Deduplicated SQLite corpus ({db_path}):", flush=True)
     print(f"  - Unique articles: {unique_articles} (Open Access: {oa_count}, Preprints: {preprints})", flush=True)
+    print(f"  - Articles with :Complications provenance: {comp_articles}", flush=True)
     print(f"  - Clinical trials: {unique_trials}", flush=True)
 
 
