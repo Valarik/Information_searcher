@@ -101,7 +101,6 @@ Plans:
 | 3. Синтез отчетов в 3 форматах (Humanized) | 3/3 | Complete    | 2026-11-04 |
 | 4. Интерактивное приложение и верификация | 1/1 | Complete    | 2026-11-04 |
 
-
 ---
 
 ## Milestone 2: Универсализация платформы и полный цикл по нозологии «Преждевременное излитие околоплодных вод» (`prom`, МКБ-10: `O42`)
@@ -110,7 +109,6 @@ Plans:
 - [x] **Phase 6: Структурированная кластерная экстракция по ПИОВ/ПРПО (`src/extract_prom.py`)** — извлечение количественных патогенетических механизмов (`extracted_mechanisms`) и клинических доказательств (`extracted_clinical_evidence`) по 4 кластерам (этиология/микробиом, молекулярный патогенез/биомаркеры, выжидательная тактика/антибиотики/кортикостероиды/нейропротекция, индукция родов/серкляж/амниоинфузия/исходы) и генерация досье в `data/prom/extractions/`.
 - [x] **Phase 7: Синтез отчётов по ПИОВ/ПРПО в 3 форматах (`reports/prom/`) и Zero-Tolerance верификация** — написание диссертационной монографии (`reports/prom/dissertation_report.md`), краткого клинического отчёта (`reports/prom/executive_summary.md`), 5 модулей базы знаний и универсального индекса `reports/prom/knowledge_base/kb_index.json` с прогоном `src/verify_reports.py --nosology prom --compile-bibliography --verify`.
 - [x] **Phase 8: Проверка универсального веб-приложения `app.py` на нозологии `prom` и публикация на GitHub** — проверка всех 4 вкладок через `uv run app.py --self-test` и отправка обновлённого универсального приложения в GitHub (`Valarik/Information_searcher`).
-
 
 ---
 
@@ -121,7 +119,6 @@ Plans:
 - [x] **Phase 11: Синтез отчётов в 3 форматах (`reports/metroplasty_pregnancy/`) и Zero-Tolerance верификация** — написание диссертационной монографии (`reports/metroplasty_pregnancy/dissertation_report.md`), краткого клинического отчёта (`reports/metroplasty_pregnancy/executive_summary.md`), 5 модулей базы знаний и универсального индекса `reports/metroplasty_pregnancy/knowledge_base/kb_index.json` с прогоном `src/verify_reports.py --nosology metroplasty_pregnancy --compile-bibliography --verify`.
 - [x] **Phase 12: Интеграция в универсальное веб-приложение `app.py`, самотестирование и публикация на GitHub** — проверка переключения нозологий (`metroplasty_pregnancy` и `prom`) и всех 4 вкладок через `uv run app.py --self-test` и отправка в `Valarik/Information_searcher`.
 
-
 ---
 
 ## Milestone 4: Полный цикл исследования по теме «Болезнь Нотта (стенозирующий лигаментит сгибателей пальцев кисти) с углубленным анализом боли и контрактуры ПМФС до и после операции» (`trigger_finger`, МКБ-10: `M65.3`)
@@ -130,7 +127,6 @@ Plans:
 - [x] **Phase 14: Структурированная кластерная экстракция (`src/extract_trigger_finger.py`)** — извлечение патоморфологических и биомеханических механизмов (`extracted_mechanisms`, включая патогенез узла Нотта, трение в области хиазмы Кампера и связки `A2`, ретракцию ладонной пластинки ПМФС и 6-месячный цикл ремоделирования сухожилия после релиза `A1`) и клинических доказательств (`extracted_clinical_evidence`) с генерацией 4 досье в `data/trigger_finger/extractions/`.
 - [x] **Phase 15: Синтез отчётов в 3 форматах (`reports/trigger_finger/`) и Zero-Tolerance верификация** — написание диссертационной монографии (`reports/trigger_finger/dissertation_report.md`), краткого клинического отчёта (`reports/trigger_finger/executive_summary.md`), 5 модулей базы знаний и универсального индекса `reports/trigger_finger/knowledge_base/kb_index.json` с отдельным детальным разбором до- и послеоперационной патологии ПМФС, прогоном `src/verify_reports.py --nosology trigger_finger --compile-bibliography --verify`.
 - [x] **Phase 16: Интеграция в универсальное веб-приложение `app.py`, самотестирование и публикация на GitHub** — проверка всех нозологий в `app.py --self-test` и отправка в `Valarik/Information_searcher`.
-
 
 ---
 
@@ -153,6 +149,19 @@ Plans:
   2. `src/triage.py` выделяет тематический тег `complications_safety`, отражает его в `prisma_stats.md` и включает работы по осложнениям в загрузку полнотекстовых XML.
   3. `src/schema.py` и `src/extractor_common.py` создают и обслуживают таблицу `extracted_complications` (`Clavien–Dindo`, частота `%`, обратимость, сроки, анатомическая причина, профилактика и лечение), корректно работая и со старыми базами `v1.x` без падений.
   4. `src/universal_schema.py` валидирует структуру `frequent_complications` в режиме `v2.0` и безопасно обрабатывает ее отсутствие в существующих нозологиях `v1.x`.
+
+**Plans**: 3 plans
+
+Plans:
+
+**Wave 1**
+
+- [ ] 17-01: Реляционная схема `extracted_complications`, двойная ось тяжести `Clavien–Dindo` / `CTCAE`, анти-рецидивные парсеры в `extractor_common.py` и агрегация `frequent_complications` в `universal_schema.py` с защитой баз `v1.x`
+- [ ] 17-02: Гибридный API-сбор осложнений в `harvester.py` и двухконтурный PRISMA-триаж с приоритетной выгрузкой XML `complications_safety` в `triage.py`
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
+- [ ] 17-03: Модульные, интеграционные и read-only `v1.x` регрессионные автотесты Фазы 17 (`tests/test_phase17_complications.py`)
 
 ### Phase 18: Хуманизация v2.0 — нелинейная логика клинического выбора и структурный анти-ИИ линтер
 

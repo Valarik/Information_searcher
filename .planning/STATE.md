@@ -2,14 +2,14 @@
 gsd_state_version: 1.0
 milestone: v2.0
 milestone_name: Профиль хирургических осложнений и клиническая де-ИИзация выводов
-status: planning
-stopped_at: Phase 17 context gathered
-last_updated: "2026-11-17T18:12:00.000Z"
-last_activity: 2026-11-17
+status: ready_to_execute
+stopped_at: Phase 17 planned (3 plans in 2 waves)
+last_updated: "2026-11-19T16:00:00.000Z"
+last_activity: 2026-11-19
 progress:
   total_phases: 3
   completed_phases: 0
-  total_plans: 0
+  total_plans: 3
   completed_plans: 0
   percent: 0
 ---
@@ -26,9 +26,9 @@ See: `.planning/PROJECT.md` (updated 2026-11-13)
 ## Current Position
 
 Phase: 17 of 19 (1 of 3 in Milestone v2.0)
-Plan: Not started (context locked in `17-CONTEXT.md`)
-Status: Ready to plan (`/gsd-plan-phase 17`)
-Last activity: 2026-11-17 — Phase 17 context gathered (`D-01..D-09`)
+Plan: 0 of 3 executed (`17-01`, `17-02` in Wave 1; `17-03` in Wave 2)
+Status: Ready to execute (`/gsd-execute-phase 17`)
+Last activity: 2026-11-19 — Phase 17 planned & verified (`17-01..03-PLAN.md`, 0 blockers)
 
 Progress: `░░░░░░░░░░` 0%
 
@@ -53,6 +53,6 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-11-17T18:12:00Z
-Stopped at: Phase 17 context gathered
-Resume file: `.planning/phases/17-prisma/17-CONTEXT.md`
+Last session: 2026-11-19T16:00:00Z
+Stopped at: Phase 17 planned (3 plans in 2 waves)
+Resume file: `.planning/phases/17-prisma/17-01-PLAN.md`
