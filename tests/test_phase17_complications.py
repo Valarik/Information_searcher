@@ -4,11 +4,15 @@ Covers:
 - COMP-01, D-01..D-03, T-17-03: src/harvester.py (surgical/conservative profile, hybrid queries, raw caches, provenance merge)
 - COMP-02, D-04..D-06, T-17-04: src/triage.py (3-signal complications_safety, N>=20 vs Tier 4 casuistry, priority XML queue & PMCID_RE)
 - COMP-03, D-04, D-07, D-08, T-17-01: src/schema.py & src/extractor_common.py (dual-axis Clavien-Dindo/CTCAE, recurrence guard, JATS XML, SQL injection)
+- COMP-04, D-04, D-08, D-09, T-17-02: src/universal_schema.py (v2.0 median aggregation, validator rejections, live read-only v1.x immutability)
 """
 
 from __future__ import annotations
 
+import copy
 import json
+import sqlite3
+import subprocess
 import sys
 import types
 import urllib.request
@@ -16,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import yaml
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
@@ -25,6 +30,7 @@ import src.extractor_common as extractor_common
 import src.harvester as harvester
 import src.schema as schema
 import src.triage as triage
+import src.universal_schema as universal_schema
 
 
 # ===========================================================================
@@ -961,3 +967,423 @@ def test_schema_and_extractor_jats_xml_and_frequency_regex(tmp_path: Path) -> No
         == "в течение 2–4 месяцев"
     )
     assert extractor_common.extract_resolution_time_window("No temporal duration reported.") is None
+
+
+# ===========================================================================
+# 4. Universal Schema v2.0 tests (COMP-01, COMP-04, D-04, D-08, D-09)
+# ===========================================================================
+
+
+def test_universal_schema_v2_aggregation_sorting_and_red_flags(tmp_path: Path) -> None:
+    """Verify median aggregation (>= 1.0% descending per modality), rare_critical_red_flags (< 1.0%), and v2.0 KB validation."""
+    db_path = tmp_path / "literature.db"
+    conn = schema.init_db(db_path)
+
+    try:
+        # Insert an excluded_offtopic article to confirm aggregation ignores non-included studies
+        cur = conn.execute(
+            """
+            INSERT INTO articles (pmid, title, norm_title, pub_year, prisma_status, evidence_tier)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            ("69999999", "Excluded off-topic cohort", "excludedofftopiccohort", 2024, "excluded_offtopic", 2),
+        )
+        excluded_article_id = int(cur.lastrowid)
+        conn.commit()
+
+        # Modality 1: Open release — two cohorts for the SAME complication (10.0% and 20.0% -> median 15.0%)
+        extractor_common.insert_extracted_complication(
+            conn,
+            {
+                "pmid": "60000001",
+                "evidence_tier": 2,
+                "modality": "Open release",
+                "complication_name": "Superficial wound infection",
+                "event_class": "true_complication",
+                "clavien_dindo_grade": "II",
+                "frequency_pct": "10.0% (10/100)",
+                "frequency_num": 10.0,
+                "reversibility": "requires_conservative_therapy",
+                "anatomical_substrate": "Palmar incision",
+                "prevention_and_management": "Oral antibiotics and local wound care",
+                "sample_size": 100,
+            },
+        )
+        extractor_common.insert_extracted_complication(
+            conn,
+            {
+                "pmid": "60000002",
+                "evidence_tier": 3,
+                "modality": "Open release",
+                "complication_name": "Superficial wound infection",
+                "event_class": "true_complication",
+                "clavien_dindo_grade": "II",
+                "frequency_pct": "20.0% (12/60)",
+                "frequency_num": 20.0,
+                "reversibility": "requires_conservative_therapy",
+                "anatomical_substrate": "Palmar incision",
+                "prevention_and_management": "Oral antibiotics",
+                "sample_size": 60,
+            },
+        )
+        # Modality 1: Second complication with higher rate (28.0%) -> MUST sort before 15.0%
+        extractor_common.insert_extracted_complication(
+            conn,
+            {
+                "pmid": "60000003",
+                "evidence_tier": 2,
+                "modality": "Open release",
+                "complication_name": "Scar tenderness",
+                "event_class": "transient_postop_sequela",
+                "clavien_dindo_grade": "I",
+                "frequency_pct": "28.0% (25/90)",
+                "frequency_num": 28.0,
+                "reversibility": "transient_self_limiting",
+                "time_window": "within 3–6 months",
+                "anatomical_substrate": "Palmar subcutaneous scar",
+                "prevention_and_management": "Silicone gel and desensitization massage",
+                "sample_size": 90,
+            },
+        )
+        # Modality 1: < 1.0% Clavien-Dindo IIIb cohort complication (0.4%) -> MUST route to rare_critical_red_flags
+        extractor_common.insert_extracted_complication(
+            conn,
+            {
+                "pmid": "60000004",
+                "evidence_tier": 2,
+                "modality": "Open release",
+                "complication_name": "Deep flexor tendon adhesion requiring tenolysis",
+                "event_class": "true_complication",
+                "clavien_dindo_grade": "IIIb",
+                "frequency_pct": "0.4% (1/250)",
+                "frequency_num": 0.4,
+                "reversibility": "requires_reoperation",
+                "anatomical_substrate": "Flexor digitorum profundus tendon sheath",
+                "prevention_and_management": "Early active mobilization; surgical tenolysis if persistent",
+                "sample_size": 250,
+            },
+        )
+        # Modality 2: Percutaneous release — frequent >= 1.0% cohort event
+        extractor_common.insert_extracted_complication(
+            conn,
+            {
+                "pmid": "60000005",
+                "evidence_tier": 2,
+                "modality": "Percutaneous release",
+                "complication_name": "Transient digital paresthesia",
+                "event_class": "true_complication",
+                "clavien_dindo_grade": "I",
+                "frequency_pct": "6.5% (8/120)",
+                "frequency_num": 6.5,
+                "reversibility": "transient_self_limiting",
+                "time_window": "within 6–12 weeks",
+                "anatomical_substrate": "Radial digital nerve neuropraxia",
+                "prevention_and_management": "Observation and neuropathic monitoring",
+                "sample_size": 120,
+            },
+        )
+        # Modality 2: Tier 4 N=1 100% nerve transection case report -> MUST route to rare_critical_red_flags (< 1.0%)
+        extractor_common.insert_extracted_complication(
+            conn,
+            {
+                "pmid": "60000006",
+                "evidence_tier": 4,
+                "modality": "Percutaneous release",
+                "complication_name": "Complete digital nerve transection",
+                "event_class": "true_complication",
+                "clavien_dindo_grade": "IIIb",
+                "frequency_pct": "1/1 (100%)",
+                "frequency_num": 100.0,
+                "reversibility": "requires_reoperation",
+                "anatomical_substrate": "Radial digital nerve of thumb",
+                "prevention_and_management": "Immediate microsurgical epineural neurorrhaphy",
+                "sample_size": 1,
+            },
+        )
+        # Row linked to excluded_offtopic article -> MUST be ignored by aggregate_complications_from_sqlite()
+        extractor_common.insert_extracted_complication(
+            conn,
+            {
+                "article_id": excluded_article_id,
+                "pmid": "69999999",
+                "evidence_tier": 2,
+                "modality": "Open release",
+                "complication_name": "Excluded study artifact",
+                "event_class": "true_complication",
+                "clavien_dindo_grade": "II",
+                "frequency_pct": "42.0%",
+                "frequency_num": 42.0,
+                "reversibility": "requires_conservative_therapy",
+                "sample_size": 100,
+            },
+        )
+    finally:
+        conn.close()
+
+    freq, red_flags = universal_schema.aggregate_complications_from_sqlite(db_path)
+
+    # Only included Tier 1-3 N >= 20 events with median >= 1.0% enter frequent_complications
+    assert len(freq) == 3
+    assert all(item["complication_name"] != "Excluded study artifact" for item in freq)
+
+    open_items = [item for item in freq if item["modality"] == "Open release"]
+    assert len(open_items) == 2
+    assert [item["complication_name"] for item in open_items] == [
+        "Scar tenderness",
+        "Superficial wound infection",
+    ]
+    assert [item["frequency_median_num"] for item in open_items] == [28.0, 15.0]
+    assert open_items[0]["frequency_median_num"] >= open_items[1]["frequency_median_num"]
+
+    # Verify median calculation & range string across two cohorts (10% and 20% -> 15% (10–20%))
+    infection = open_items[1]
+    assert infection["frequency_median_num"] == 15.0
+    assert infection["frequency_pct"] == "15% (10–20%)"
+    assert infection["sample_size_total"] == 160
+    assert infection["evidence_pmids"] == ["60000001", "60000002"]
+
+    perc_items = [item for item in freq if item["modality"] == "Percutaneous release"]
+    assert len(perc_items) == 1
+    assert perc_items[0]["complication_name"] == "Transient digital paresthesia"
+    assert perc_items[0]["frequency_median_num"] == 6.5
+
+    # Both < 1.0% IIIb cohort event (0.4%) and Tier 4 N=1 nerve transection enter rare_critical_red_flags
+    assert len(red_flags) == 2
+    red_by_name = {item["complication_name"]: item for item in red_flags}
+    assert "Deep flexor tendon adhesion requiring tenolysis" in red_by_name
+    assert red_by_name["Deep flexor tendon adhesion requiring tenolysis"]["frequency_max_num"] == 0.4
+    assert "Complete digital nerve transection" in red_by_name
+    assert 0.0 <= red_by_name["Complete digital nerve transection"]["frequency_max_num"] < 1.0
+
+    # Dynamic fallback KB builds valid v2.0 contract
+    mock_cfg = {
+        "nosology": {
+            "id": "mock_trigger",
+            "name_ru": "Тестовый стенозирующий лигаментит",
+            "name_en": "Mock Trigger Finger",
+            "icd10": "M65.3",
+            "icd11": "FB40.2",
+        },
+        "date_range": {"start_year": 2016, "end_year": 2026},
+    }
+    kb = universal_schema.build_dynamic_fallback_kb("mock_trigger", mock_cfg, db_path)
+    assert kb["schema_version"] == "2.0"
+    assert kb["frequent_complications"] == freq
+    assert kb["rare_critical_red_flags"] == red_flags
+    assert universal_schema.validate_kb_complications_v2(kb) == []
+
+    # query_complications_df loads rows cleanly with URL helpers and respects include_casuistry flag
+    df_all = universal_schema.query_complications_df(db_path)
+    df_no_cas = universal_schema.query_complications_df(db_path, include_casuistry=False)
+    assert len(df_all) == 7
+    assert len(df_no_cas) == 6
+    assert "pubmed_url" in df_all.columns
+    assert "https://pubmed.ncbi.nlm.nih.gov/60000001/" in set(df_all["pubmed_url"])
+    assert (df_no_cas["is_rare_casuistry"] == 0).all()
+
+
+def test_universal_schema_v2_validator_rejects_violations(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Verify validate_kb_complications_v2 rejects schema violations and config save/discover preserves COMP-01 fields."""
+    valid_kb: dict[str, Any] = {
+        "schema_version": "2.0",
+        "frequent_complications": [
+            {
+                "modality": "Open release",
+                "complication_name": "Scar tenderness",
+                "event_class": "transient_postop_sequela",
+                "clavien_dindo_grade": "I",
+                "reversibility": "transient_self_limiting",
+                "frequency_pct": "24% (18–30%)",
+                "frequency_median_num": 24.0,
+                "sample_size_total": 140,
+                "time_window": "within 3–6 months",
+                "anatomical_substrate": "Palmar scar",
+                "prevention_and_management": "Massage and desensitization",
+                "evidence_pmids": ["70000001"],
+            },
+            {
+                "modality": "Open release",
+                "complication_name": "Superficial wound infection",
+                "event_class": "true_complication",
+                "clavien_dindo_grade": "II",
+                "reversibility": "requires_conservative_therapy",
+                "frequency_pct": "6.5%",
+                "frequency_median_num": 6.5,
+                "sample_size_total": 180,
+                "time_window": "",
+                "anatomical_substrate": "Incision skin edges",
+                "prevention_and_management": "Oral antibiotics",
+                "evidence_pmids": ["70000002"],
+            },
+        ],
+        "rare_critical_red_flags": [
+            {
+                "modality": "Open release",
+                "complication_name": "Digital nerve transection",
+                "clavien_dindo_grade": "IIIb",
+                "reversibility": "requires_reoperation",
+                "frequency_pct": "< 0.5%",
+                "frequency_max_num": 0.4,
+                "anatomical_substrate": "Radial digital nerve",
+                "prevention_and_management": "Microsurgical repair",
+                "evidence_pmids": ["70000003"],
+            }
+        ],
+    }
+    assert universal_schema.validate_kb_complications_v2(valid_kb) == []
+
+    # (a) Unsorted frequent_complications within a modality
+    kb_unsorted = copy.deepcopy(valid_kb)
+    kb_unsorted["frequent_complications"].reverse()
+    errs_a = universal_schema.validate_kb_complications_v2(kb_unsorted)
+    assert any("not sorted descending" in e for e in errs_a)
+
+    # (b) frequency_median_num < 1.0
+    kb_low_med = copy.deepcopy(valid_kb)
+    kb_low_med["frequent_complications"][1]["frequency_median_num"] = 0.7
+    errs_b = universal_schema.validate_kb_complications_v2(kb_low_med)
+    assert any("frequency_median_num must be >= 1.0" in e for e in errs_b)
+
+    # (c) sample_size_total < 20
+    kb_small_n = copy.deepcopy(valid_kb)
+    kb_small_n["frequent_complications"][1]["sample_size_total"] = 12
+    errs_c = universal_schema.validate_kb_complications_v2(kb_small_n)
+    assert any("sample_size_total must be >= 20" in e for e in errs_c)
+
+    # (d) Excluded recurrence event ("True recurrence")
+    kb_recurrence = copy.deepcopy(valid_kb)
+    kb_recurrence["frequent_complications"][1]["complication_name"] = "True recurrence"
+    errs_d = universal_schema.validate_kb_complications_v2(kb_recurrence)
+    assert any("recurrence" in e.lower() for e in errs_d)
+
+    # (e) Invalid clavien_dindo_grade ("VI")
+    kb_bad_cd = copy.deepcopy(valid_kb)
+    kb_bad_cd["frequent_complications"][1]["clavien_dindo_grade"] = "VI"
+    errs_e = universal_schema.validate_kb_complications_v2(kb_bad_cd)
+    assert any("clavien_dindo_grade" in e for e in errs_e)
+
+    # (f) transient_postop_sequela with empty time_window
+    kb_no_tw = copy.deepcopy(valid_kb)
+    kb_no_tw["frequent_complications"][0]["time_window"] = "   "
+    errs_f = universal_schema.validate_kb_complications_v2(kb_no_tw)
+    assert any("time_window" in e for e in errs_f)
+
+    # Red flag with frequency_max_num >= 1.0 rejected
+    kb_bad_rf = copy.deepcopy(valid_kb)
+    kb_bad_rf["rare_critical_red_flags"][0]["frequency_max_num"] = 1.5
+    errs_rf = universal_schema.validate_kb_complications_v2(kb_bad_rf)
+    assert any("frequency_max_num" in e for e in errs_rf)
+
+    # COMP-01 + T-17-05: save_new_nosology_config() & discover_nosologies() on isolated tmp_path
+    tmp_configs = tmp_path / "configs"
+    monkeypatch.setattr(universal_schema, "CONFIGS_DIR", tmp_configs)
+
+    saved_surg = universal_schema.save_new_nosology_config(
+        {
+            "nosology": {
+                "id": "carpal_tunnel_test",
+                "name_ru": "Синдром запястного канала",
+                "name_en": "Carpal Tunnel Syndrome",
+                "icd10": "G56.0",
+            },
+            "complications_queries": {
+                "pubmed": '("Carpal Tunnel Syndrome"[MeSH]) AND ("pillar pain"[tiab])',
+                "europepmc": '("carpal tunnel") AND ("pillar pain")',
+            },
+        }
+    )
+    assert saved_surg.exists()
+    loaded_yaml = yaml.safe_load(saved_surg.read_text(encoding="utf-8"))
+    assert loaded_yaml["nosology"]["surgical_focus"] is True
+    assert loaded_yaml["complications_queries"]["pubmed"] == '("Carpal Tunnel Syndrome"[MeSH]) AND ("pillar pain"[tiab])'
+    assert loaded_yaml["complications_queries"]["europepmc"] == '("carpal tunnel") AND ("pillar pain")'
+
+    saved_cons = universal_schema.save_new_nosology_config(
+        {
+            "nosology": {
+                "id": "conservative_demo",
+                "name_ru": "Терапевтическая нозология",
+                "name_en": "Conservative Demo",
+            },
+            "treatment_profile": "conservative",
+        }
+    )
+    assert saved_cons.exists()
+
+    discovered = {item["id"]: item for item in universal_schema.discover_nosologies(tmp_configs)}
+    assert discovered["carpal_tunnel_test"]["surgical_focus"] is True
+    assert discovered["carpal_tunnel_test"]["treatment_profile"] == "surgical"
+    assert "complications_queries" in discovered["carpal_tunnel_test"]["raw_config"]
+    assert discovered["conservative_demo"]["surgical_focus"] is False
+    assert discovered["conservative_demo"]["treatment_profile"] == "conservative"
+
+    # T-17-05: path traversal nosology ID rejected
+    with pytest.raises(ValueError):
+        universal_schema.save_new_nosology_config({"nosology": {"id": "../escape"}})
+
+
+# ===========================================================================
+# 5. Live read-only Milestone 1.x backward-compatibility tests (COMP-04, D-09, T-17-02)
+# ===========================================================================
+
+
+def test_v1_backward_compat_prom_metroplasty_trigger_finger_readonly() -> None:
+    """Verify frozen v1.x corpora open cleanly in read-only mode with zero disk mutations (COMP-04, T-17-02)."""
+    for nos_id in ("prom", "metroplasty_pregnancy", "trigger_finger"):
+        db_path = PROJECT_ROOT / "data" / nos_id / "literature.db"
+        assert db_path.exists(), f"Expected frozen v1.x database at {db_path}"
+
+        stat_before = db_path.stat()
+        wal_path = Path(f"{db_path}-wal")
+        shm_path = Path(f"{db_path}-shm")
+        wal_before = wal_path.exists()
+        shm_before = shm_path.exists()
+
+        stats = universal_schema.get_sqlite_corpus_stats(db_path)
+        assert stats["unique_articles"] > 0
+        assert stats["extracted_complications_rows"] == 0
+
+        df_comp = universal_schema.query_complications_df(db_path)
+        assert df_comp.empty
+
+        freq_v1, red_v1 = universal_schema.aggregate_complications_from_sqlite(db_path)
+        assert freq_v1 == []
+        assert red_v1 == []
+
+        bundle = universal_schema.load_nosology_bundle(nos_id)
+        assert bundle["nosology_id"] == nos_id
+        assert "kb_index" in bundle
+
+        # Auto schema verification passes cleanly in v1.x compat mode
+        assert universal_schema.verify_universal_schema(nos_id, schema_version="auto") == 0
+        # Explicit strict v2 mode cleanly fails without mutating v1.x files
+        assert universal_schema.verify_universal_schema(nos_id, schema_version="v2") == 1
+
+        # Strict read-only URI inspection confirms extracted_complications was NOT created
+        ro_conn = sqlite3.connect(f"file:{db_path.resolve().as_posix()}?mode=ro", uri=True)
+        try:
+            assert extractor_common.table_exists(ro_conn, "extracted_complications") is False
+        finally:
+            ro_conn.close()
+
+        # Byte-level immutability: identical (st_mtime_ns, st_size) and no new -wal/-shm sidecars
+        stat_after = db_path.stat()
+        assert (stat_after.st_mtime_ns, stat_after.st_size) == (
+            stat_before.st_mtime_ns,
+            stat_before.st_size,
+        )
+        assert wal_path.exists() == wal_before
+        assert shm_path.exists() == shm_before
+
+    # Git working tree confirms zero mutations anywhere in data/ or reports/
+    git_res = subprocess.run(
+        ["git", "status", "--porcelain", "data/", "reports/"],
+        cwd=PROJECT_ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert git_res.stdout.strip() == ""
+
