@@ -695,3 +695,161 @@ def test_v1_reports_read_only_backward_compat() -> None:
         text=True,
     )
     assert git_res.stdout.strip() == "", f"Frozen v1.x directories modified:\n{git_res.stdout}"
+
+
+# ===========================================================================
+# 6. Phase 18 Code Review Regressions (CR-01..CR-03, WR-01..WR-06, IN-01..IN-02)
+# ===========================================================================
+
+
+def test_phase18_code_review_regressions(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Lock fixes for every Critical, Warning, and Info finding in 18-REVIEW.md."""
+    # CR-01: CRLF line endings & 4-backtick fences must NOT truncate the remainder of the report
+    crlf_report = (
+        "## Глава 1. Осложнения\r\n\r\n"
+        "Частые осложнения после вмешательства оценивались по Clavien–Dindo I–II и включали транзиторные явления.\r\n\r\n"
+        "```text\r\n"
+        "Алгоритм наблюдения\r\n"
+        "```\r\n\r\n"
+        "````markdown\r\n"
+        "Вложенный пример\r\n"
+        "````\r\n\r\n"
+        "## Глава 2. Заключение\r\n\r\n"
+        "Подводя итог, можно заключить, что для стадии I подходит метод А. Для стадии II подходит метод Б. Для стадии III подходит метод В.\r\n"
+    )
+    res_crlf = verify_reports.check_humanizer_v2_structure(crlf_report, mode="dissertation", schema_version="2.0")
+    assert res_crlf["passed"] is False
+    assert "подводя итог, можно заключить" in res_crlf["banned_phrases_found"]
+    assert res_crlf["pigeonhole_matches"], "CRLF + 4-backtick report failed to detect trailing pigeonhole conclusion"
+
+    # CR-02: _has_valid_evidence_pmids rejects non-PMID placeholders ("TBD", 0, -1); verify_all_reports catches hallucinated KB PMIDs
+    assert universal_schema._has_valid_evidence_pmids(["TBD"]) is False
+    assert universal_schema._has_valid_evidence_pmids([0]) is False
+    assert universal_schema._has_valid_evidence_pmids([-1]) is False
+    assert universal_schema._has_valid_evidence_pmids(["88000001"]) is True
+
+    artifacts = _create_synthetic_v2_nosology(tmp_path, nosology_id="cr02_v2_check")
+    kb_hallucinated = json.loads(artifacts["kb_json"].read_text(encoding="utf-8"))
+    kb_hallucinated["clinical_decision_nuances"]["universal_workhorse_modalities"][0]["evidence_pmids"] = ["99999999"]
+    artifacts["kb_json"].write_text(json.dumps(kb_hallucinated, ensure_ascii=False, indent=2), encoding="utf-8")
+    with pytest.raises(AssertionError, match="Missing evidence_pmids"):
+        verify_reports.verify_all_reports("cr02_v2_check", schema_version="v2", write_outputs=False, base_dir=tmp_path)
+
+    # CR-03: load_nosology_bundle blocks path traversal on nosology_id and escaping kb_index modules[*].file
+    with pytest.raises(ValueError):
+        universal_schema.load_nosology_bundle("../../nonexistent_traversal_probe")
+
+    esc_root = tmp_path / "cr03_escape"
+    (esc_root / "configs").mkdir(parents=True)
+    (esc_root / "data" / "esc_nos").mkdir(parents=True)
+    kb_esc_dir = esc_root / "reports" / "esc_nos" / "knowledge_base"
+    kb_esc_dir.mkdir(parents=True)
+    (kb_esc_dir / "kb_index.json").write_text(
+        json.dumps({"modules": [{"id": "m1", "title": "Bad", "file": "../../secret.md"}]}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(universal_schema, "CONFIGS_DIR", esc_root / "configs")
+    monkeypatch.setattr(universal_schema, "DATA_DIR", esc_root / "data")
+    monkeypatch.setattr(universal_schema, "REPORTS_DIR", esc_root / "reports")
+    with pytest.raises(ValueError, match="escapes knowledge_base dir"):
+        universal_schema.load_nosology_bundle("esc_nos")
+
+    # WR-01: Legitimate Clavien-Dindo I-III summary, 3-arm RCT reporting, and explicit refutations must NOT trigger pigeonhole
+    legit_prose = (
+        "## Глава 1. Профиль осложнений\n\n"
+        "По данным проспективных регистров послеоперационные осложнения стратифицированы по Clavien–Dindo: "
+        "осложнения степени I купируются самостоятельно без медикаментов, события степени II требуют короткой "
+        "консервативной терапии, а осложнения степени III связаны с необходимостью повторного вмешательства. "
+        "Отдельно разграничиваются первичная форма заболевания, вторичная форма при сопутствующем диабете и тяжелая форма.\n\n"
+        "## Глава 2. Заключение и клинические компромиссы\n\n"
+        "В рандомизированном исследовании три рукава исследования (группа 1 получила инъекцию, группе 2 выполнена операция, "
+        "в группе 3 применено альтернативное вмешательство) показали перекрывающиеся показания без одного универсального победителя. "
+        "При стадии I открытая и чрескожная операции конкурируют на равных, при стадии II оба метода равноценны по долгосрочной функции, "
+        "а при стадии III обе методики сохраняют эффективность; выбор определяется опытом хирурга, доступностью УЗИ-навигации и "
+        "компромиссом между рубцовой болезненностью и скоростью реабилитации.\n"
+    )
+    res_legit = verify_reports.check_humanizer_v2_structure(legit_prose, mode="dissertation", schema_version="2.0")
+    assert res_legit["pigeonhole_matches"] == [], f"False-positive pigeonhole: {res_legit['pigeonhole_matches']}"
+    assert res_legit["passed"] is True, f"Legitimate prose failed: {res_legit['errors']}"
+
+    # WR-02: Verb-before-stage, bulleted I/II/III стадия, severity bullets, literal 'для 1..2..3', and routing tables ARE caught
+    pigeonhole_variants = [
+        "## Заключение\nКонсервативная терапия показана при стадии I. Чрескожный релиз оптимален при стадии II. Открытая операция выполняется при стадии III.",
+        "## Заключение\nКонсервативная терапия показана при I стадии. Чрескожный релиз оптимален при II стадии. Открытая операция выполняется при III стадии.",
+        "## Заключение\n- **I стадия:** консервативная терапия.\n- **II стадия:** чрескожный релиз.\n- **III стадия:** открытая операция.",
+        "## Заключение\n- **Лёгкая степень:** шинирование.\n- **Средняя степень:** инъекции.\n- **Тяжёлая степень:** открытая лигаментотомия.",
+        "## Заключение\nЭто лечение для 1, это для 2, это для 3.",
+        "## Заключение\n| Стадия | Метод |\n|---|---|\n| Стадия I | Инъекция |\n| Стадия II | Чрескожный релиз |\n| Стадия III | Открытая операция |",
+    ]
+    for variant in pigeonhole_variants:
+        res_v = verify_reports.check_humanizer_v2_structure(variant, mode="summary", schema_version="2.0")
+        assert res_v["pigeonhole_matches"], f"WR-02 missed pigeonhole variant:\n{variant}"
+
+    # WR-03: Chapter 1 'Стратегия поиска' must NOT hijack conclusion scanning away from trailing pigeonhole Chapter 2
+    hijack_doc = (
+        "## Глава 1. Стратегия поиска и PRISMA\n\n"
+        "Включены исследования осложнений по Clavien–Dindo с оценкой перекрывающихся методик и опыта хирурга.\n\n"
+        "## Глава 2. Сравнительный анализ хирургических методов\n\n"
+        "Для стадии I подходит метод А. Для стадии II подходит метод Б. Для стадии III подходит метод В.\n"
+    )
+    res_hijack = verify_reports.check_humanizer_v2_structure(hijack_doc, mode="summary", schema_version="2.0")
+    assert res_hijack["pigeonhole_matches"], "WR-03: Chapter 1 'Стратегия поиска' hijacked conclusion check"
+
+    # WR-04: Numbered bold-lead walls count toward bold_lead_bullet_ratio; tables reset consecutive bold runs
+    numbered_wall = "\n".join(
+        f"{i}. **Пункт анализа {i}:** краткое описание без полноценной аналитической прозы."
+        for i in range(1, 8)
+    )
+    res_num = verify_reports.check_humanizer_v2_structure(numbered_wall, mode="dissertation", schema_version="2.0")
+    assert res_num["bold_lead_bullets"] == 7
+    assert res_num["bold_lead_bullet_ratio"] > 0.35
+
+    split_by_table = (
+        "- **Пункт 1:** а.\n- **Пункт 2:** б.\n- **Пункт 3:** в.\n- **Пункт 4:** г.\n\n"
+        "| Кол 1 | Кол 2 |\n|---|---|\n| A | B |\n\n"
+        "- **Пункт 5:** д.\n- **Пункт 6:** е.\n- **Пункт 7:** ж.\n"
+    )
+    res_tbl = verify_reports.check_humanizer_v2_structure(split_by_table, mode="dissertation", schema_version="2.0")
+    assert res_tbl["max_consecutive_bold_bullets"] == 4
+
+    # WR-05: Substring false passes ('биодоступность', 'отсутствие альтернативы', 'неосложненным' + 'профилактика') blocked
+    tricky_doc = (
+        "## Глава 1. Введение\n\n"
+        "У пациентов с неосложненным течением важна первичная профилактика рецидивов, учитывая биодоступность препаратов "
+        "и рубцовое поражение матки при отсутствии альтернативы.\n\n"
+        "## Глава 2. Выводы\n\n"
+        "Биодоступность препарата и отсутствие альтернативы при рубцовом поражении определяют исход наблюдения.\n"
+    )
+    res_tricky = verify_reports.check_humanizer_v2_structure(tricky_doc, mode="summary", schema_version="2.0")
+    assert res_tricky["has_complications_analysis"] is False
+    assert res_tricky["has_overlapping_nuance_signals"] is False
+
+    # WR-06 & IN-01 & IN-02: validate_kb_v2(None) safe, 'на сегодняшний день' caught, write_outputs=True renders audit & .docx
+    assert universal_schema.validate_kb_v2(None)  # type: ignore[arg-type]
+    assert universal_schema.validate_kb_complications_v2(None)  # type: ignore[arg-type]
+    res_today = verify_reports.check_humanizer_v2_structure(
+        "На сегодняшний день применяются конкурирующие методики.", mode="summary", schema_version="2.0"
+    )
+    assert "на сегодняшний день" in res_today["banned_phrases_found"]
+
+    # Writable end-to-end test in isolated tmp_path (IN-02)
+    writable_artifacts = _create_synthetic_v2_nosology(tmp_path / "writable_case", nosology_id="write_v2_test")
+    res_w = verify_reports.verify_all_reports(
+        " WRITE_V2_TEST ", schema_version="v2", write_outputs=True, base_dir=tmp_path / "writable_case"
+    )
+    assert res_w["passed"] is True
+    assert res_w["nosology_id"] == "write_v2_test"
+    audit_md = (writable_artifacts["rep_dir"] / "verification_audit.md").read_text(encoding="utf-8")
+    assert "PASSED (v2.0 Strict)" in audit_md
+    assert "bold_lead_bullet_ratio" in audit_md
+    assert (writable_artifacts["rep_dir"] / "dissertation_report.docx").exists()
+
+    # CLI check: --compile-bibliography --read-only exits non-zero (IN-02)
+    cli_err = subprocess.run(
+        [sys.executable, str(PROJECT_ROOT / "src" / "verify_reports.py"), "--nosology", "prom", "--compile-bibliography", "--read-only"],
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+    )
+    assert cli_err.returncode != 0
+

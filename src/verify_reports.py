@@ -114,49 +114,62 @@ BANNED_AI_V2_CONCLUSION_PHRASES: tuple[str, ...] = (
     "каждый метод имеет свои преимущества и недостатки",
     "не существует универсального метода",
     "заслуживает особого внимания",
+    "на сегодняшний день",
     "в заключение следует отметить",
     "в контексте современной медицины",
     "является методом выбора для всех",
 )
 
 _BIB_SPLIT_RE = re.compile(r"(?im)^##\s+Список литературы\b")
-_FENCED_CODE_RE = re.compile(r"(?ms)^[ \t]*(?:```|~~~).*?(?:^[ \t]*(?:```|~~~)[ \t]*$|\Z)")
+# CR-01: Match 3+ backticks or tildes with backreference \1 on LF-normalized text
+_FENCED_CODE_RE = re.compile(r"(?ms)^[ \t]*(`{3,}|~{3,})[^\n]*\n.*?(?:^[ \t]*\1[ \t]*$|\Z)")
 _TABLE_SEP_RE = re.compile(r"^\|?[\s:|-]+\|[\s:|-]*$")
 _HR_RE = re.compile(r"^(?:[-*_]\s*){3,}$")
-_BOLD_LEAD_BULLET_RE = re.compile(r"^\s*[-*+]\s+\*\*[^*]{2,120}\*\*(?:\s*[:—–-])?")
+# WR-04: Match both unordered (-, *, +) and numbered (1., 2.) bold-lead list walls
+_BOLD_LEAD_BULLET_RE = re.compile(r"^\s*(?:[-*+]|\d+\.)\s+\*\*[^*]{2,120}\*\*(?:\s*[:—–-])?")
 _TOTAL_BULLET_RE = re.compile(r"^\s*(?:[-*+]|\d+\.)\s+\S")
 _H2_HEADING_RE = re.compile(r"(?m)^##\s+(.+)$")
-_FINAL_SECTION_TITLE_RE = re.compile(
-    r"заключ|вывод|тактик|алгоритм|резюме|стратег|итог|рекомендац",
+_CONCLUSION_PRIMARY_TITLE_RE = re.compile(
+    r"заключ|вывод|резюме|итог|рекомендац",
+    flags=re.IGNORECASE,
+)
+_CONCLUSION_SECONDARY_TITLE_RE = re.compile(
+    r"тактик|алгоритм|стратег",
     flags=re.IGNORECASE,
 )
 
+# WR-05: Word-bounded & negation-aware nuance signals (rejects 'биодоступность', 'отсутствие альтернативы', bare diagnosis 'рубец')
 _NUANCE_SIGNALS_RE = re.compile(
-    r"перекрыва|сквозн|конкурир|нюанс|компромисс|"
-    r"опыт\w*\s+(?:хирург|оператор|специалист)|"
-    r"крив\w+\s+обучен|оснащ[её]н|доступност|"
-    r"руб(?:ец|ц)|предпочтен\w*\s+пациент|"
-    r"об[ае]\s+метод|обе\s+методик|равноценн|альтернатив",
+    r"(?<![а-яё])перекрыва|(?<![а-яё])сквозн|(?<![а-яё])конкурир|(?<![а-яё])нюанс|(?<![а-яё])компромисс|"
+    r"(?<![а-яё])опыт\w*\s+(?:хирург|оператор|специалист)|"
+    r"(?<![а-яё])крив\w+\s+обучен|(?<![а-яё])оснащ[её]н|(?<![а-яё])доступност|"
+    r"(?<![а-яё])рубцов\w*\s+(?:болезненн|дискомфорт|морбидн|чувствительн|осложнен)|"
+    r"(?<![а-яё])послеоперационн\w*\s+руб|"
+    r"(?<![а-яё])предпочтен\w*\s+пациент|"
+    r"(?<![а-яё])об[ае]\s+метод|(?<![а-яё])обе\s+методик|(?<![а-яё])равноценн|"
+    r"(?<!отсутствия\s)(?<!отсутствие\s)(?<!отсутствии\s)(?<!без\s)(?<!нет\s)(?<!не\sимеет\s)(?<![а-яё])альтернатив",
     flags=re.IGNORECASE,
 )
 
-_COMPLICATIONS_ROOT_RE = re.compile(r"осложнен", flags=re.IGNORECASE)
+# WR-05: Negative lookbehind excludes 'неосложненным'; requires co-occurrence in same section/proximity
+_COMPLICATIONS_ROOT_RE = re.compile(r"(?<![а-яё])осложн[её]н", flags=re.IGNORECASE)
 _COMPLICATIONS_STRUCTURE_RE = re.compile(
-    r"clavien|ctcae|ятроген|транзиторн|профилактик|обратим",
+    r"\bclavien\b|\bctcae\b|(?<![а-яё])ятроген|(?<![а-яё])транзиторн|(?<![а-яё])профилактик|(?<![а-яё])обратим",
     flags=re.IGNORECASE,
 )
 
-# Mechanical pigeonhole routing patterns:
-# 1) Stage/Group/Severity -> Treatment slot ("для стадии I подходит метод А", "- Стадия II: методом выбора выступает ...")
+# WR-01 & WR-02: Prescriptive routing predicates only (no generic nouns like 'операция'/'терапия')
 _STAGE_ROUTING_VERBS = (
-    r"(?:подходит|показан\w*|рекоменд\w*|выбирают|оптимальн\w*|метод\w*\s+выбора|"
-    r"требуется|применяют|назначают|выполняют|предпочтительн\w*|целесообразн\w*|"
-    r"исключительно|метод\s+[А-ЯA-Z1-9]|терапи\w*|операци\w*|релиз\w*|инъекц\w*|"
-    r"хирург\w*|реконструкц\w*|лечени\w*|вмешательств\w*)"
+    r"(?:подходит|показан\w*|рекоменд\w*|выбира\w*|оптимал[еь]\w*|метод\w*\s+выбора|"
+    r"требует\w*|применя\w*|назнача\w*|выполня\w*|предпочтител[еь]\w*|целесообраз\w*|"
+    r"исключительно|метод\s+[А-ЯA-Z1-9])"
 )
 _STAGE_NOUNS = r"(?:стади[ияйю]|степен[иья]|групп[еыау]|тип[еау]|вариант[еау]|форм[еыа]|категори[ия])"
+# Exclude 'первичн...' and 'вторичн...' by requiring ordinal case endings on перв-/втор-
 _STAGE_MARKERS = (
-    r"(?P<slot>IV|III|II|I|[1-4]|перв\w*|втор\w*|треть\w*|четверт\w*|"
+    r"(?P<slot>IV|III|II|I|[1-4]|"
+    r"перв(?:ой|ая|ую|ом|ого|ому|ым)|втор(?:ой|ая|ую|ом|ого|ому|ым)|"
+    r"треть(?:ей|я|ю|ем|его|ему|им)|четверт\w*|"
     r"легк\w*|лёгк\w*|средн\w*|тяжел\w*|тяжёл\w*|ранн\w*|поздн\w*|начальн\w*)"
     r"(?!\s*[–-]\s*(?:IV|III|II|I|[1-4])\b)"
 )
@@ -166,19 +179,36 @@ _PIGEONHOLE_STAGE_AFTER_RE = re.compile(
     rf"[^.\n;]{{0,70}}?(?:[:—–-]\s*[^.\n;]{{0,45}}?)?{_STAGE_ROUTING_VERBS}",
     flags=re.IGNORECASE,
 )
+_PIGEONHOLE_STAGE_BEFORE_RE = re.compile(
+    rf"(?:^|[\s,;.•\-*+])(?:для|при)?\s*{_STAGE_MARKERS}\s+{_STAGE_NOUNS}"
+    rf"[^.\n;]{{0,70}}?(?:[:—–-]\s*[^.\n;]{{0,45}}?)?{_STAGE_ROUTING_VERBS}",
+    flags=re.IGNORECASE,
+)
+_PIGEONHOLE_VERB_BEFORE_AFTER_RE = re.compile(
+    rf"{_STAGE_ROUTING_VERBS}[^.\n;]{{0,45}}?(?:для|при)\s+{_STAGE_NOUNS}\s*{_STAGE_MARKERS}\b",
+    flags=re.IGNORECASE,
+)
+_PIGEONHOLE_VERB_BEFORE_BEFORE_RE = re.compile(
+    rf"{_STAGE_ROUTING_VERBS}[^.\n;]{{0,45}}?(?:для|при)\s+{_STAGE_MARKERS}\s+{_STAGE_NOUNS}",
+    flags=re.IGNORECASE,
+)
 _PIGEONHOLE_STAGE_AFTER_DASH_RE = re.compile(
     rf"(?:^|[\s,;.•\-*+])(?:для|при)\s+{_STAGE_NOUNS}\s*{_STAGE_MARKERS}\b"
-    rf"[^.\n;—–]{{0,30}}[—–]\s*[А-Яа-яA-Za-z]",
+    rf"[^.\n;—–]{{0,30}}[—–:]\s*[А-Яа-яA-Za-z]",
     flags=re.IGNORECASE,
 )
 _PIGEONHOLE_STAGE_BEFORE_DASH_RE = re.compile(
-    rf"(?:^|[\s,;.•\-*+])(?:для|при)\s+{_STAGE_MARKERS}\s*{_STAGE_NOUNS}"
-    rf"[^.\n;—–]{{0,30}}[—–]\s*[А-Яа-яA-Za-z]",
+    rf"(?:^|[\s,;.•\-*+])(?:для|при)\s+{_STAGE_MARKERS}\s+{_STAGE_NOUNS}"
+    rf"[^.\n;—–]{{0,30}}[—–:]\s*[А-Яа-яA-Za-z]",
     flags=re.IGNORECASE,
 )
-_PIGEONHOLE_STAGE_BEFORE_RE = re.compile(
-    rf"(?:^|[\s,;.•\-*+])(?:для|при)\s+{_STAGE_MARKERS}\s*{_STAGE_NOUNS}"
-    rf"[^.\n;]{{0,70}}?(?:[:—–-]\s*[^.\n;]{{0,45}}?)?{_STAGE_ROUTING_VERBS}",
+# Bullet/list line slot mappings: "- Стадия I: консервативная терапия", "- I стадия: ...", "- Лёгкая степень: ..."
+_PIGEONHOLE_BULLET_AFTER_RE = re.compile(
+    rf"(?m)^[ \t]*(?:[-*+]|\d+\.)\s*{_STAGE_NOUNS}\s*{_STAGE_MARKERS}\b[^:\n—–]{{0,30}}[:—–]\s*[А-Яа-яA-Za-z]",
+    flags=re.IGNORECASE,
+)
+_PIGEONHOLE_BULLET_BEFORE_RE = re.compile(
+    rf"(?m)^[ \t]*(?:[-*+]|\d+\.)\s*{_STAGE_MARKERS}\s+{_STAGE_NOUNS}[^:\n—–]{{0,30}}[:—–]\s*[А-Яа-яA-Za-z]",
     flags=re.IGNORECASE,
 )
 _PIGEONHOLE_METHOD_SLOT_RE = re.compile(
@@ -188,20 +218,41 @@ _PIGEONHOLE_METHOD_SLOT_RE = re.compile(
     rf"(?:{_STAGE_NOUNS}\s*)?{_STAGE_MARKERS}\b",
     flags=re.IGNORECASE,
 )
-_EXPLICIT_PODHODIT_DIGIT_RE = re.compile(
-    r"подходит\s+для\s+(?P<slot>[1-4]|I{1,3}|IV|перв\w*|втор\w*|треть\w*)",
+_EXPLICIT_SHORT_SLOT_RE = re.compile(
+    r"(?:подходит\s+|лечени\w*\s+|метод\w*\s+|это\s+(?:лечени\w*\s+|метод\w*\s+)?)для\s+"
+    r"(?P<slot>[1-4]|I{1,3}|IV|перв(?:ой|ого)|втор(?:ой|ого)|треть(?:ей|его))\b",
+    flags=re.IGNORECASE,
+)
+_PIGEONHOLE_EXEMPT_CONTEXT_RE = re.compile(
+    r"\bclavien\b|\bctcae\b|конкурир|равноценн|перекрыва|об[ае]\s+метод|обе\s+методик|"
+    r"не\s+делят|вне\s+зависимости\s+от\s+стади|рандомизир|рукав\w*\s+исследован",
+    flags=re.IGNORECASE,
+)
+_TABLE_STAGE_CELL_AFTER_RE = re.compile(
+    rf"^{_STAGE_NOUNS}\s*{_STAGE_MARKERS}\b",
+    flags=re.IGNORECASE,
+)
+_TABLE_STAGE_CELL_BEFORE_RE = re.compile(
+    rf"^{_STAGE_MARKERS}\s+{_STAGE_NOUNS}\b",
     flags=re.IGNORECASE,
 )
 _ORDINAL_GROUP_PATTERNS = (
-    re.compile(r"(?:для|при)\s+перв\w*\s+(?:групп|стади|категори)", flags=re.IGNORECASE),
-    re.compile(r"(?:для|при)\s+втор\w*\s+(?:групп|стади|категори)", flags=re.IGNORECASE),
-    re.compile(r"(?:для|при)\s+треть\w*\s+(?:групп|стади|категори)", flags=re.IGNORECASE),
+    re.compile(r"(?:для|при)\s+перв(?:ой|ого)\s+(?:групп|стади|категори)", flags=re.IGNORECASE),
+    re.compile(r"(?:для|при)\s+втор(?:ой|ого)\s+(?:групп|стади|категори)", flags=re.IGNORECASE),
+    re.compile(r"(?:для|при)\s+треть(?:ей|его)\s+(?:групп|стади|категори)", flags=re.IGNORECASE),
 )
+
+_BREAK_SENTINEL = "---"
+
+
+def _normalize_newlines(text: str) -> str:
+    """Normalize CRLF/CR line endings to LF so multiline regexes never fail on Windows (CR-01)."""
+    return (text or "").replace("\r\n", "\n").replace("\r", "\n")
 
 
 def _strip_bibliography(text: str) -> str:
     """Remove `## Список литературы` and everything after it."""
-    parts = _BIB_SPLIT_RE.split(text, maxsplit=1)
+    parts = _BIB_SPLIT_RE.split(_normalize_newlines(text), maxsplit=1)
     return parts[0]
 
 
@@ -216,38 +267,85 @@ def _is_table_line(stripped_line: str) -> bool:
 
 
 def _strip_markdown_tables(text: str) -> str:
-    """Replace Markdown table lines with blank lines so paragraph boundaries stay intact."""
+    """Replace Markdown table blocks with a structural break sentinel so bullet runs never merge across tables (WR-04)."""
     out_lines: list[str] = []
+    in_table = False
     for line in text.splitlines():
         if _is_table_line(line.strip()):
-            out_lines.append("")
+            if not in_table:
+                out_lines.append(_BREAK_SENTINEL)
+                in_table = True
         else:
+            in_table = False
             out_lines.append(line)
     return "\n".join(out_lines)
 
 
 def _extract_final_analytical_section(body_text: str) -> str:
-    """Extract the last tactical/conclusion `## ` section, or final 25% of body text."""
+    """Extract the final conclusion/tactical section(s) from the second half of the report (WR-03)."""
     headings = list(_H2_HEADING_RE.finditer(body_text))
-    matching_indices = [
-        idx
+    if not headings:
+        if len(body_text) <= 2000:
+            return body_text
+        return body_text[int(len(body_text) * 0.75) :]
+
+    half_idx = len(headings) // 2
+    half_pos = int(len(body_text) * 0.45)
+    eligible = [
+        (idx, match)
         for idx, match in enumerate(headings)
-        if _FINAL_SECTION_TITLE_RE.search(match.group(1))
+        if idx >= half_idx or match.start() >= half_pos
     ]
-    if matching_indices:
-        last_idx = matching_indices[-1]
-        start = headings[last_idx].start()
-        end = headings[last_idx + 1].start() if last_idx + 1 < len(headings) else len(body_text)
-        return body_text[start:end]
 
+    primary_matches = [
+        idx for idx, match in eligible if _CONCLUSION_PRIMARY_TITLE_RE.search(match.group(1))
+    ]
+    secondary_matches = [
+        idx for idx, match in eligible if _CONCLUSION_SECONDARY_TITLE_RE.search(match.group(1))
+    ]
+
+    chosen_idx: int | None = None
+    if primary_matches:
+        chosen_idx = primary_matches[-1]
+    elif secondary_matches:
+        chosen_idx = secondary_matches[-1]
+
+    last_idx = len(headings) - 1
+    if chosen_idx is not None:
+        start = headings[chosen_idx].start()
+        end = headings[chosen_idx + 1].start() if chosen_idx + 1 < len(headings) else len(body_text)
+        section = body_text[start:end]
+        if chosen_idx != last_idx:
+            section = section + "\n\n" + body_text[headings[last_idx].start() :]
+        return section
+
+    last_section = body_text[headings[last_idx].start() :]
+    tail_quarter = body_text[int(len(body_text) * 0.75) :]
+    return last_section if len(last_section) >= len(tail_quarter) else tail_quarter
+
+
+def _has_section_complications_analysis(body_no_code: str) -> bool:
+    """Verify non-negated complications and structured safety markers co-occur in the same section/window (WR-05)."""
+    headings = list(_H2_HEADING_RE.finditer(body_no_code))
     if headings:
-        last_section = body_text[headings[-1].start() :]
-        tail_quarter = body_text[int(len(body_text) * 0.75) :]
-        return last_section if len(last_section) >= len(tail_quarter) else tail_quarter
+        sections: list[str] = []
+        if headings[0].start() > 0:
+            sections.append(body_no_code[: headings[0].start()])
+        for idx, match in enumerate(headings):
+            start = match.start()
+            end = headings[idx + 1].start() if idx + 1 < len(headings) else len(body_no_code)
+            sections.append(body_no_code[start:end])
+        return any(
+            _COMPLICATIONS_ROOT_RE.search(sec) and _COMPLICATIONS_STRUCTURE_RE.search(sec)
+            for sec in sections
+        )
 
-    if len(body_text) <= 2000:
-        return body_text
-    return body_text[int(len(body_text) * 0.75) :]
+    for m_root in _COMPLICATIONS_ROOT_RE.finditer(body_no_code):
+        win_start = max(0, m_root.start() - 1500)
+        win_end = min(len(body_no_code), m_root.end() + 1500)
+        if _COMPLICATIONS_STRUCTURE_RE.search(body_no_code[win_start:win_end]):
+            return True
+    return False
 
 
 def _canonical_slot_key(raw_slot: str) -> str:
@@ -263,24 +361,41 @@ def _canonical_slot_key(raw_slot: str) -> str:
     return s
 
 
+def _sentence_around(text: str, start: int, end: int) -> str:
+    left = max(text.rfind("\n", 0, start), text.rfind(".", 0, start))
+    right_nl = text.find("\n", end)
+    right_dot = text.find(".", end)
+    candidates = [pos for pos in (right_nl, right_dot) if pos != -1]
+    right = min(candidates) if candidates else len(text)
+    return text[left + 1 : right]
+
+
 def _detect_pigeonhole_routing(
+    final_section_raw: str,
     final_section_no_tables: str,
     *,
     has_overlapping_nuance_signals: bool,
 ) -> list[str]:
-    """Detect mechanical 'treatment 1 for 1, treatment 2 for 2, treatment 3 for 3' routing."""
+    """Detect mechanical 'treatment 1 for 1, treatment 2 for 2, treatment 3 for 3' routing (WR-01, WR-02)."""
     clean = re.sub(r"[*_`]", "", final_section_no_tables)
     hits: list[tuple[int, int, str, str]] = []
 
     for pattern in (
         _PIGEONHOLE_STAGE_AFTER_RE,
         _PIGEONHOLE_STAGE_BEFORE_RE,
+        _PIGEONHOLE_VERB_BEFORE_AFTER_RE,
+        _PIGEONHOLE_VERB_BEFORE_BEFORE_RE,
         _PIGEONHOLE_STAGE_AFTER_DASH_RE,
         _PIGEONHOLE_STAGE_BEFORE_DASH_RE,
+        _PIGEONHOLE_BULLET_AFTER_RE,
+        _PIGEONHOLE_BULLET_BEFORE_RE,
         _PIGEONHOLE_METHOD_SLOT_RE,
-        _EXPLICIT_PODHODIT_DIGIT_RE,
+        _EXPLICIT_SHORT_SLOT_RE,
     ):
         for m in pattern.finditer(clean):
+            local_sentence = _sentence_around(clean, m.start(), m.end())
+            if _PIGEONHOLE_EXEMPT_CONTEXT_RE.search(local_sentence):
+                continue
             slot_key = _canonical_slot_key(m.group("slot"))
             excerpt = " ".join(m.group(0).split())[:110]
             hits.append((m.start(), m.end(), slot_key, excerpt))
@@ -308,6 +423,31 @@ def _detect_pigeonhole_routing(
             matches_out.append(f"Механическая маршрутизация по {len(seen_slots)} непересекающимся слотам: {excerpts}")
             break
 
+    # Check Markdown routing tables inside final_section_raw for 3+ 1-to-1 stage->method rows (WR-02)
+    if not matches_out:
+        table_slots: dict[str, str] = {}
+        for line in final_section_raw.splitlines():
+            st = line.strip()
+            if not _is_table_line(st) or _TABLE_SEP_RE.match(st):
+                if table_slots and len(table_slots) >= 3:
+                    break
+                if not _is_table_line(st):
+                    table_slots.clear()
+                continue
+            cells = [re.sub(r"[*_`]", "", c).strip() for c in st.strip("|").split("|")]
+            if len(cells) < 2:
+                continue
+            row_joined = " ".join(cells)
+            if _PIGEONHOLE_EXEMPT_CONTEXT_RE.search(row_joined):
+                continue
+            m_cell = _TABLE_STAGE_CELL_AFTER_RE.match(cells[0]) or _TABLE_STAGE_CELL_BEFORE_RE.match(cells[0])
+            if m_cell and cells[1]:
+                slot_key = _canonical_slot_key(m_cell.group("slot"))
+                table_slots.setdefault(slot_key, f"{cells[0]} -> {cells[1][:50]}")
+        if len(table_slots) >= 3:
+            excerpts = " | ".join(list(table_slots.values())[:4])
+            matches_out.append(f"Табличная 1-к-1 маршрутизация по {len(table_slots)} стадиям/группам: {excerpts}")
+
     # Secondary check: explicit ordinal 1st/2nd/3rd group splitting without workhorse nuance signals
     if not matches_out and not has_overlapping_nuance_signals:
         if all(pat.search(clean) for pat in _ORDINAL_GROUP_PATTERNS):
@@ -327,7 +467,7 @@ def check_humanizer_v2_structure(
 ) -> dict[str, Any]:
     """Run structural anti-AI linter v2.0 (HUM2-03) with v1.x non-blocking compatibility."""
     body_no_bib = _strip_bibliography(text or "")
-    body_no_code = _FENCED_CODE_RE.sub("\n", body_no_bib)
+    body_no_code = _FENCED_CODE_RE.sub(f"\n{_BREAK_SENTINEL}\n", body_no_bib)
     body_no_tables = _strip_markdown_tables(body_no_code)
 
     bold_lead_bullets = 0
@@ -383,13 +523,11 @@ def check_humanizer_v2_structure(
 
     has_overlapping_nuance_signals = bool(_NUANCE_SIGNALS_RE.search(final_section_raw))
     pigeonhole_matches = _detect_pigeonhole_routing(
+        final_section_raw,
         final_section_no_tables,
         has_overlapping_nuance_signals=has_overlapping_nuance_signals,
     )
-    has_complications_analysis = bool(
-        _COMPLICATIONS_ROOT_RE.search(body_no_code)
-        and _COMPLICATIONS_STRUCTURE_RE.search(body_no_code)
-    )
+    has_complications_analysis = _has_section_complications_analysis(body_no_code)
 
     lower_body = body_no_code.lower()
     legacy_banned = [p for p in BANNED_AI_PHRASES if p in lower_body]
@@ -647,7 +785,8 @@ def verify_all_reports(
     if schema_version not in ("auto", "v1", "v2"):
         raise ValueError(f"Unsupported schema_version: {schema_version!r} (expected 'auto', 'v1', or 'v2')")
 
-    paths = get_nosology_paths(nosology_id, base_dir=base_dir)
+    nos_id = validate_nosology_id(nosology_id)
+    paths = get_nosology_paths(nos_id, base_dir=base_dir)
     root_dir = paths["root"]
     reports_root = paths["reports_root"]
     db_path = paths["db"]
@@ -681,10 +820,13 @@ def verify_all_reports(
     finally:
         conn.close()
 
-    # Verify kb_index.json early to resolve effective schema_version
-    kb_json_path = kb_dir / "kb_index.json"
+    # Verify kb_index.json early to resolve effective schema_version (WR-06, IN-02)
+    kb_json_path = (kb_dir / "kb_index.json").resolve()
+    if not kb_json_path.is_relative_to(reports_root):
+        raise ValueError(f"KB index escapes reports root: {kb_json_path}")
     assert kb_json_path.exists(), f"Missing kb_index.json at {kb_json_path}!"
     kb_data = json.loads(kb_json_path.read_text(encoding="utf-8"))
+    assert isinstance(kb_data, dict), f"kb_index.json must be a JSON object: {kb_json_path}"
     assert len(kb_data.get("modules", [])) == 5, "kb_index.json must index 5 modules"
     assert len(kb_data.get("modalities", [])) >= 8, "kb_index.json must include >= 8 treatment modalities"
 
@@ -698,7 +840,7 @@ def verify_all_reports(
         sum_path,
         *sorted(kb_dir.glob("*.md")),
     ]
-    assert len(report_files) == 7, f"Expected 7 Markdown report files for '{nosology_id}', found {len(report_files)}"
+    assert len(report_files) == 7, f"Expected 7 Markdown report files for '{nos_id}', found {len(report_files)}"
 
     audit_rows: list[dict[str, Any]] = []
     total_unique_pmids: set[str] = set()
@@ -739,12 +881,11 @@ def verify_all_reports(
         assert not missing_pmcids, f"[{path.name}] Missing PMCIDs in {db_path}: {missing_pmcids}"
         assert not missing_ncts, f"[{path.name}] Missing NCT IDs in {db_path}: {missing_ncts}"
 
-        # Check banned AI phrases (strip bibliography for v2.0 to avoid journal title collisions)
-        text_for_phrase_check = (
-            _strip_bibliography(content).lower()
-            if effective_version == "2.0"
-            else content.lower()
-        )
+        # Check banned AI phrases (strip bibliography + fenced code blocks consistently in v2.0, IN-01)
+        if effective_version == "2.0":
+            text_for_phrase_check = _FENCED_CODE_RE.sub("\n", _strip_bibliography(content)).lower()
+        else:
+            text_for_phrase_check = content.lower()
         triggered_phrases = [p for p in active_banned_phrases if p in text_for_phrase_check]
         assert not triggered_phrases, f"[{path.name}] Banned AI phrases detected: {triggered_phrases}"
 
@@ -799,6 +940,35 @@ def verify_all_reports(
         assert v2_kb_errors == [], (
             f"[KB v2.0 Contract Failure — {kb_json_path.name}] {v2_kb_errors}"
         )
+        # CR-02: Zero-Tolerance cross-check of kb_index.json evidence_pmids against SQLite valid_pmids
+        kb_pmids: set[str] = set()
+        for bucket in (kb_data.get("frequent_complications") or [], kb_data.get("rare_critical_red_flags") or []):
+            if isinstance(bucket, list):
+                for item in bucket:
+                    if isinstance(item, dict):
+                        kb_pmids.update(
+                            str(p).strip()
+                            for p in (item.get("evidence_pmids") or [])
+                            if p is not None and str(p).strip()
+                        )
+        nuances_obj = kb_data.get("clinical_decision_nuances") or {}
+        if isinstance(nuances_obj, dict):
+            for sec_key in (
+                "universal_workhorse_modalities",
+                "overlapping_indications_and_gray_zones",
+                "strict_niche_or_salvage_indications",
+            ):
+                for item in nuances_obj.get(sec_key) or []:
+                    if isinstance(item, dict):
+                        kb_pmids.update(
+                            str(p).strip()
+                            for p in (item.get("evidence_pmids") or [])
+                            if p is not None and str(p).strip()
+                        )
+        missing_kb_pmids = sorted(kb_pmids - valid_pmids)
+        assert not missing_kb_pmids, (
+            f"[{kb_json_path.name}] Missing evidence_pmids in {db_path}: {missing_kb_pmids}"
+        )
         humanizer_v2_status = "PASSED (v2.0 Strict)"
     else:
         assert diss_lint["passed"], f"[Humanizer v1.x Failure — {diss_path.name}] {diss_lint['errors']}"
@@ -810,7 +980,7 @@ def verify_all_reports(
     if write_outputs:
         from src.docx_exporter import export_nosology_docx_files
 
-        docx_paths = export_nosology_docx_files(nosology_id, root_dir)
+        docx_paths = export_nosology_docx_files(nos_id, root_dir)
         for _docx_key, docx_file in docx_paths.items():
             assert docx_file.exists() and docx_file.stat().st_size > 2048, (
                 f"Missing or empty .docx file: {docx_file}"
@@ -818,14 +988,14 @@ def verify_all_reports(
 
         rel_db = db_path.relative_to(root_dir).as_posix()
         audit_lines = [
-            f"# Сертификат автоматической верификации отчётов (`src/verify_reports.py` — `{nosology_id}`)",
+            f"# Сертификат автоматической верификации отчётов (`src/verify_reports.py` — `{nos_id}`)",
             "",
             "- **Статус проверки:** `PASSED (Zero-Tolerance Gate)`",
             f"- **Версия схемы (`schema_version`):** `{effective_version}`",
             f"- **Структурный линтер `ru-medical-humanizer v2.0` (`humanizer_v2_status`):** `{humanizer_v2_status}`",
             f"- **Метрика прозы диссертации (`bold_lead_bullet_ratio`):** `{diss_lint['bold_lead_bullet_ratio']:.4f}` "
             f"(жирных пунктов: `{diss_lint['bold_lead_bullets']}`, абзацев прозы ≥120 симв.: `{diss_lint['prose_paragraphs']}`)",
-            f"- **Нозология:** {cfg.get('name_ru', nosology_id)} (`{cfg.get('icd10', '—')}`)",
+            f"- **Нозология:** {cfg.get('name_ru', nos_id)} (`{cfg.get('icd10', '—')}`)",
             f"- **База данных верификации:** `{rel_db}` (`{inc_cnt}` включённых статей, `{ct_cnt}` протоколов `ClinicalTrials.gov`)",
             f"- **Число библиографических источников `[1]..[{len(bib_items)}]` в диссертационном отчёте:** `{len(bib_items)}` (`100%` подтверждены в SQLite)",
             "- **Нарушений словаря `ru-medical-humanizer`:** `0`",
@@ -846,20 +1016,20 @@ def verify_all_reports(
     mode_tag = " [READ-ONLY]" if not write_outputs else ""
     docx_msg = " + 3 .docx files" if write_outputs else " (read-only: .docx & audit skipped)"
     print(
-        f"[Verify Reports: {nosology_id}]{mode_tag} Schema={effective_version} | "
+        f"[Verify Reports: {nos_id}]{mode_tag} Schema={effective_version} | "
         f"Humanizer={humanizer_v2_status} | bold_lead_bullet_ratio={diss_lint['bold_lead_bullet_ratio']:.4f}"
     )
     print(
-        f"[Verify Reports: {nosology_id}] Checked {len(report_files)} Markdown files + kb_index.json{docx_msg}."
+        f"[Verify Reports: {nos_id}] Checked {len(report_files)} Markdown files + kb_index.json{docx_msg}."
     )
     print(
-        f"[Verify Reports: {nosology_id}] Dissertation bibliography entries: {len(bib_items)} [1]..[{len(bib_items)}]"
+        f"[Verify Reports: {nos_id}] Dissertation bibliography entries: {len(bib_items)} [1]..[{len(bib_items)}]"
     )
-    print(f"[Verify Reports: {nosology_id}] ALL REPORT VERIFICATION CHECKS PASSED.")
+    print(f"[Verify Reports: {nos_id}] ALL REPORT VERIFICATION CHECKS PASSED.")
 
     return {
         "passed": True,
-        "nosology_id": validate_nosology_id(nosology_id),
+        "nosology_id": nos_id,
         "schema_version": effective_version,
         "read_only": not write_outputs,
         "included_articles": inc_cnt,

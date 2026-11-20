@@ -669,27 +669,40 @@ def build_dynamic_fallback_kb(
 
 
 def load_nosology_bundle(nosology_id: str) -> dict[str, Any]:
-    """Load the complete unified data bundle for any configured nosology."""
-    cfg_path = CONFIGS_DIR / f"{nosology_id}.yaml"
+    """Load the complete unified data bundle for any configured nosology (CR-03, T-18-02)."""
+    nosology_id = validate_nosology_id(nosology_id)
+    configs_root = CONFIGS_DIR.resolve()
+    data_root = DATA_DIR.resolve()
+    reports_root = REPORTS_DIR.resolve()
+
+    cfg_path = (configs_root / f"{nosology_id}.yaml").resolve()
+    db_path = (data_root / nosology_id / "literature.db").resolve()
+    rep_dir = (reports_root / nosology_id).resolve()
+    kb_dir = (rep_dir / "knowledge_base").resolve()
+    kb_index_path = (kb_dir / "kb_index.json").resolve()
+    if (
+        not cfg_path.is_relative_to(configs_root)
+        or not db_path.is_relative_to(data_root)
+        or not rep_dir.is_relative_to(reports_root)
+        or not kb_dir.is_relative_to(reports_root)
+        or not kb_index_path.is_relative_to(kb_dir)
+    ):
+        raise ValueError(f"Path traversal blocked for nosology_id={nosology_id!r}")
+
     config: dict[str, Any] = {}
     if cfg_path.exists():
         config = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
 
-    db_path = DATA_DIR / nosology_id / "literature.db"
-    rep_dir = REPORTS_DIR / nosology_id
-    kb_dir = rep_dir / "knowledge_base"
-    kb_index_path = kb_dir / "kb_index.json"
-
     if kb_index_path.exists():
         kb_data = json.loads(kb_index_path.read_text(encoding="utf-8"))
+        if not isinstance(kb_data, dict):
+            raise ValueError(f"kb_index.json must be a JSON object: {kb_index_path}")
     else:
         kb_data = build_dynamic_fallback_kb(nosology_id, config, db_path)
 
-    # T-18-02: In-memory only normalization for missing clinical_decision_nuances (never writes to disk).
-    # Preserve malformed v2.0 sub-objects intact so validate_kb_clinical_nuances_v2() catches violations.
-    if "clinical_decision_nuances" not in kb_data:
-        kb_data["clinical_decision_nuances"] = _default_clinical_decision_nuances()
-    elif str(kb_data.get("schema_version", "")) != "2.0":
+    # T-18-02 & IN-02: In-memory only normalization for legacy v1.x corpora (never writes to disk).
+    # For schema_version == '2.0', preserve missing/malformed clinical_decision_nuances intact so validation reports the exact error.
+    if str(kb_data.get("schema_version", "")) != "2.0":
         nuances_val = kb_data.get("clinical_decision_nuances")
         if not isinstance(nuances_val, dict):
             kb_data["clinical_decision_nuances"] = _default_clinical_decision_nuances()
@@ -710,13 +723,20 @@ def load_nosology_bundle(nosology_id: str) -> dict[str, Any]:
 
     kb_modules: list[dict[str, str]] = []
     for mod in kb_data.get("modules", []):
-        m_file = kb_dir / mod.get("file", "")
+        if not isinstance(mod, dict):
+            continue
+        raw_mod_file = str(mod.get("file") or "").strip()
+        if not raw_mod_file:
+            continue
+        m_file = (kb_dir / raw_mod_file).resolve()
+        if not m_file.is_relative_to(kb_dir):
+            raise ValueError(f"KB module path escapes knowledge_base dir: {raw_mod_file!r}")
         content = m_file.read_text(encoding="utf-8") if m_file.exists() else ""
         kb_modules.append(
             {
                 "id": mod.get("id", ""),
-                "title": mod.get("title", mod.get("file", "")),
-                "file": mod.get("file", ""),
+                "title": mod.get("title", raw_mod_file),
+                "file": raw_mod_file,
                 "category": mod.get("category", ""),
                 "content": content,
             }
@@ -1155,8 +1175,31 @@ def save_new_nosology_config(config_payload: dict[str, Any]) -> Path:
     return out_path
 
 
+_PMID_STR_RE = re.compile(r"^[1-9]\d{0,8}$")
+
+
+def _is_nonempty_str(value: Any) -> bool:
+    """Return True strictly for non-blank strings."""
+    return isinstance(value, str) and bool(value.strip())
+
+
+def _has_valid_evidence_pmids(pmids: Any) -> bool:
+    """Validate non-empty evidence_pmids array containing strictly numeric positive PMIDs (CR-02, T-18-01)."""
+    if not isinstance(pmids, list) or len(pmids) == 0:
+        return False
+    return all(
+        p is not None
+        and not isinstance(p, bool)
+        and isinstance(p, (str, int))
+        and bool(_PMID_STR_RE.fullmatch(str(p).strip()))
+        for p in pmids
+    )
+
+
 def validate_kb_complications_v2(kb: dict[str, Any]) -> list[str]:
-    """Validate schema_version '2.0' frequent_complications and rare_critical_red_flags contract (COMP-04, D-07..D-09, CR-05)."""
+    """Validate schema_version '2.0' frequent_complications and rare_critical_red_flags contract (COMP-04, D-07..D-09, CR-02, CR-05, WR-06)."""
+    if not isinstance(kb, dict):
+        return ["Knowledge base payload must be a dict"]
     errors: list[str] = []
     if str(kb.get("schema_version", "")) != "2.0":
         errors.append(f"Expected schema_version == '2.0', got {kb.get('schema_version')!r}")
@@ -1242,9 +1285,8 @@ def validate_kb_complications_v2(kb: dict[str, Any]) -> list[str]:
                     f"frequent_complications[{idx}] sample_size_total must be >= 20, got {n_raw!r}"
                 )
 
-            pmids = entry.get("evidence_pmids")
-            if not isinstance(pmids, list) or not any(p is not None and str(p).strip() for p in pmids):
-                errors.append(f"frequent_complications[{idx}] evidence_pmids must be a non-empty list")
+            if not _has_valid_evidence_pmids(entry.get("evidence_pmids")):
+                errors.append(f"frequent_complications[{idx}] evidence_pmids must be a non-empty list of valid PMIDs")
 
     red_flags = kb.get("rare_critical_red_flags")
     if not isinstance(red_flags, list):
@@ -1290,33 +1332,14 @@ def validate_kb_complications_v2(kb: dict[str, Any]) -> list[str]:
                     f"rare_critical_red_flags[{idx}] frequency_max_num must be in [0.0, 1.0), got {max_raw}"
                 )
 
-            pmids = entry.get("evidence_pmids")
-            if not isinstance(pmids, list) or not any(p is not None and str(p).strip() for p in pmids):
-                errors.append(f"rare_critical_red_flags[{idx}] evidence_pmids must be a non-empty list")
+            if not _has_valid_evidence_pmids(entry.get("evidence_pmids")):
+                errors.append(f"rare_critical_red_flags[{idx}] evidence_pmids must be a non-empty list of valid PMIDs")
 
     return errors
 
 
-def _is_nonempty_str(value: Any) -> bool:
-    """Return True strictly for non-blank strings."""
-    return isinstance(value, str) and bool(value.strip())
-
-
-def _has_valid_evidence_pmids(pmids: Any) -> bool:
-    """Validate non-empty evidence_pmids array without None/blank/bool entries (T-18-01)."""
-    if not isinstance(pmids, list) or len(pmids) == 0:
-        return False
-    return all(
-        p is not None
-        and not isinstance(p, bool)
-        and isinstance(p, (str, int))
-        and bool(str(p).strip())
-        for p in pmids
-    )
-
-
 def validate_kb_clinical_nuances_v2(kb: dict[str, Any]) -> list[str]:
-    """Validate schema_version '2.0' clinical_decision_nuances contract (HUM2-02, T-18-01)."""
+    """Validate schema_version '2.0' clinical_decision_nuances contract (HUM2-02, CR-02, T-18-01, IN-01)."""
     errors: list[str] = []
     if not isinstance(kb, dict):
         return ["Knowledge base payload must be a dict"]
@@ -1335,16 +1358,9 @@ def validate_kb_clinical_nuances_v2(kb: dict[str, Any]) -> list[str]:
     else:
         workhorses = nuances.get("universal_workhorse_modalities")
         if not isinstance(workhorses, list) or len(workhorses) == 0:
-            modalities = kb.get("modalities")
-            if isinstance(modalities, list) and len(modalities) >= 2:
-                errors.append(
-                    "clinical_decision_nuances.universal_workhorse_modalities must be a non-empty list "
-                    "(>= 1 workhorse modality required when >= 2 modalities exist)"
-                )
-            else:
-                errors.append(
-                    "clinical_decision_nuances.universal_workhorse_modalities must be a non-empty list"
-                )
+            errors.append(
+                "clinical_decision_nuances.universal_workhorse_modalities must be a non-empty list (>= 1 workhorse modality)"
+            )
         else:
             for idx, entry in enumerate(workhorses):
                 prefix = f"clinical_decision_nuances.universal_workhorse_modalities[{idx}]"
@@ -1444,7 +1460,9 @@ def validate_kb_clinical_nuances_v2(kb: dict[str, Any]) -> list[str]:
 
 
 def validate_kb_v2(kb: dict[str, Any]) -> list[str]:
-    """Validate full schema_version '2.0' KB contract (complications + clinical_decision_nuances)."""
+    """Validate full schema_version '2.0' KB contract (complications + clinical_decision_nuances, WR-06)."""
+    if not isinstance(kb, dict):
+        return ["Knowledge base payload must be a dict"]
     return validate_kb_complications_v2(kb) + validate_kb_clinical_nuances_v2(kb)
 
 
