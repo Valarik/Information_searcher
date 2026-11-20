@@ -174,6 +174,18 @@ Plans:
   2. `.agent/skills/nosology-research-pipeline/SKILL.md` и `src/universal_schema.py` фиксируют структуру `clinical_decision_nuances` (`universal_workhorse_modalities`, `overlapping_indications_and_gray_zones`, `strict_niche_or_salvage_indications`) и обязательный модуль/главу по осложнениям лечения для всех новых нозологий.
   3. `src/verify_reports.py` включает структурный анти-ИИ линтер (`check_humanizer_v2_structure`): расширенный словарь штампов и клишированных выводов, контроль доли списков с жирным зачином (`- **Заголовок:** ...`) относительно аналитических абзацев и проверку нелинейности заключительной главы для нозологий `v2.0`.
 
+**Plans**: 2 plans
+
+Plans:
+
+**Wave 1**
+
+- [ ] 18-01: Обновление скиллов `ru-medical-humanizer` и `nosology-research-pipeline` до `v2.0` и добавление контракта `clinical_decision_nuances` в `src/universal_schema.py`
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
+- [ ] 18-02: Структурный анти-ИИ линтер `v2.0` в `src/verify_reports.py` и комплект автотестов `tests/test_phase18_humanizer.py`
+
 ### Phase 19: Визуализация осложнений и клинических нюансов в app.py, экспорт .docx и автотесты v2.0
 
 **Goal**: Вывести матрицу и графики хирургических осложнений (`Clavien–Dindo`) и блок перекрывающихся показаний в `app.py` и `.docx`, подтвердив работу движка `v2.0` и обратную совместимость с `v1.x` автоматическими тестами.

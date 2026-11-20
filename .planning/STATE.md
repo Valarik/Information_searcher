@@ -1,17 +1,17 @@
 ---
 gsd_state_version: 1.0
 milestone: v2.0
-milestone_name: Профиль хирургических осложнений и клиническая де-ИИзация выводов
-status: ready_to_discuss
+milestone_name: — нелинейная логика клинического выбора и структурный анти-ИИ линтер
+status: executing
 stopped_at: Phase 17 complete and verified (13/13 must-haves, 11/11 pytest)
-last_updated: "2026-11-19T17:26:00.000Z"
-last_activity: 2026-11-19
+last_updated: "2026-11-20T08:15:45.191Z"
+last_activity: 2026-11-20 -- Phase 18 execution started
 progress:
-  total_phases: 3
-  completed_phases: 1
-  total_plans: 3
-  completed_plans: 3
-  percent: 33
+  total_phases: 7
+  completed_phases: 5
+  total_plans: 15
+  completed_plans: 13
+  percent: 71
 ---
 
 # Project State
@@ -21,14 +21,14 @@ progress:
 See: `.planning/PROJECT.md` (updated 2026-11-19)
 
 **Core value:** Доказательный, 100% трассируемый по `PMID / DOI / NCT ID` синтез клинической и фундаментальной литературы без галлюцинаций, канцелярита и структурных ИИ-штампов, отражающий реальную неоднозначность хирургического и терапевтического выбора.
-**Current focus:** Milestone `v2.0` — Phase 18: Хуманизация `v2.0` — нелинейная логика клинического выбора и структурный анти-ИИ линтер
+**Current focus:** Phase 18 — Хуманизация v2.0 — нелинейная логика клинического выбора и структурный анти-ИИ линтер
 
 ## Current Position
 
-Phase: 18 of 19 (2 of 3 in Milestone v2.0; Phase 17 Complete)
-Plan: Not started
-Status: Ready to discuss Phase 18 (`/gsd-discuss-phase 18`)
-Last activity: 2026-11-19 — Phase 17 completed, code-reviewed, and verified (`17-VERIFICATION.md`: `passed`, `13/13`)
+Phase: 18 (Хуманизация v2.0 — нелинейная логика клинического выбора и структурный анти-ИИ линтер) — EXECUTING
+Plan: 1 of 2
+Status: Executing Phase 18
+Last activity: 2026-11-20 -- Phase 18 execution started
 
 Progress: `███░░░░░░░` 33%
 
