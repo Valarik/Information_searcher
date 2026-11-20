@@ -109,6 +109,45 @@ REQUIRED_RED_FLAG_KEYS = [
     "evidence_pmids",
 ]
 
+REQUIRED_CLINICAL_NUANCE_SECTIONS = (
+    "universal_workhorse_modalities",
+    "overlapping_indications_and_gray_zones",
+    "strict_niche_or_salvage_indications",
+)
+
+REQUIRED_WORKHORSE_KEYS = (
+    "modality",
+    "applicable_spectrum",
+    "practical_nuances",
+    "surgeon_and_equipment_factors",
+    "patient_tradeoffs",
+    "evidence_pmids",
+)
+
+REQUIRED_OVERLAP_KEYS = (
+    "clinical_scenario",
+    "competing_modalities",
+    "why_no_single_winner",
+    "decisive_practical_factors",
+    "evidence_pmids",
+)
+
+REQUIRED_NICHE_KEYS = (
+    "modality",
+    "narrow_indication_or_salvage_role",
+    "why_not_first_line_for_all",
+    "evidence_pmids",
+)
+
+
+def _default_clinical_decision_nuances() -> dict[str, list[Any]]:
+    """Return a fresh empty v2.0 clinical_decision_nuances structure (in-memory safe default)."""
+    return {
+        "universal_workhorse_modalities": [],
+        "overlapping_indications_and_gray_zones": [],
+        "strict_niche_or_salvage_indications": [],
+    }
+
 _CLAVIEN_SEVERITY_RANK: dict[str, int] = {
     "I": 1,
     "II": 2,
@@ -625,7 +664,10 @@ def build_dynamic_fallback_kb(
         "modalities": modalities,
         "frequent_complications": freq_comps,
         "rare_critical_red_flags": red_flags,
+        "clinical_decision_nuances": _default_clinical_decision_nuances(),
     }
+
+
 def load_nosology_bundle(nosology_id: str) -> dict[str, Any]:
     """Load the complete unified data bundle for any configured nosology."""
     cfg_path = CONFIGS_DIR / f"{nosology_id}.yaml"
@@ -642,6 +684,19 @@ def load_nosology_bundle(nosology_id: str) -> dict[str, Any]:
         kb_data = json.loads(kb_index_path.read_text(encoding="utf-8"))
     else:
         kb_data = build_dynamic_fallback_kb(nosology_id, config, db_path)
+
+    # T-18-02: In-memory only normalization for missing clinical_decision_nuances (never writes to disk).
+    # Preserve malformed v2.0 sub-objects intact so validate_kb_clinical_nuances_v2() catches violations.
+    if "clinical_decision_nuances" not in kb_data:
+        kb_data["clinical_decision_nuances"] = _default_clinical_decision_nuances()
+    elif str(kb_data.get("schema_version", "")) != "2.0":
+        nuances_val = kb_data.get("clinical_decision_nuances")
+        if not isinstance(nuances_val, dict):
+            kb_data["clinical_decision_nuances"] = _default_clinical_decision_nuances()
+        else:
+            for section_key in REQUIRED_CLINICAL_NUANCE_SECTIONS:
+                if not isinstance(nuances_val.get(section_key), list):
+                    nuances_val[section_key] = []
 
     live_stats = get_sqlite_corpus_stats(db_path)
     if live_stats["unique_articles"] > 0:
@@ -1242,8 +1297,159 @@ def validate_kb_complications_v2(kb: dict[str, Any]) -> list[str]:
     return errors
 
 
+def _is_nonempty_str(value: Any) -> bool:
+    """Return True strictly for non-blank strings."""
+    return isinstance(value, str) and bool(value.strip())
+
+
+def _has_valid_evidence_pmids(pmids: Any) -> bool:
+    """Validate non-empty evidence_pmids array without None/blank/bool entries (T-18-01)."""
+    if not isinstance(pmids, list) or len(pmids) == 0:
+        return False
+    return all(
+        p is not None
+        and not isinstance(p, bool)
+        and isinstance(p, (str, int))
+        and bool(str(p).strip())
+        for p in pmids
+    )
+
+
+def validate_kb_clinical_nuances_v2(kb: dict[str, Any]) -> list[str]:
+    """Validate schema_version '2.0' clinical_decision_nuances contract (HUM2-02, T-18-01)."""
+    errors: list[str] = []
+    if not isinstance(kb, dict):
+        return ["Knowledge base payload must be a dict"]
+
+    nuances = kb.get("clinical_decision_nuances")
+    if not isinstance(nuances, dict):
+        return [
+            "Field 'clinical_decision_nuances' must be an object containing "
+            "universal_workhorse_modalities, overlapping_indications_and_gray_zones, "
+            "and strict_niche_or_salvage_indications"
+        ]
+
+    # 1. universal_workhorse_modalities (>= 1 entry)
+    if "universal_workhorse_modalities" not in nuances:
+        errors.append("clinical_decision_nuances missing required section 'universal_workhorse_modalities'")
+    else:
+        workhorses = nuances.get("universal_workhorse_modalities")
+        if not isinstance(workhorses, list) or len(workhorses) == 0:
+            modalities = kb.get("modalities")
+            if isinstance(modalities, list) and len(modalities) >= 2:
+                errors.append(
+                    "clinical_decision_nuances.universal_workhorse_modalities must be a non-empty list "
+                    "(>= 1 workhorse modality required when >= 2 modalities exist)"
+                )
+            else:
+                errors.append(
+                    "clinical_decision_nuances.universal_workhorse_modalities must be a non-empty list"
+                )
+        else:
+            for idx, entry in enumerate(workhorses):
+                prefix = f"clinical_decision_nuances.universal_workhorse_modalities[{idx}]"
+                if not isinstance(entry, dict):
+                    errors.append(f"{prefix} must be an object")
+                    continue
+                missing = [k for k in REQUIRED_WORKHORSE_KEYS if k not in entry]
+                if missing:
+                    errors.append(f"{prefix} missing keys: {missing}")
+                for str_field in (
+                    "modality",
+                    "applicable_spectrum",
+                    "practical_nuances",
+                    "surgeon_and_equipment_factors",
+                    "patient_tradeoffs",
+                ):
+                    if str_field in entry and not _is_nonempty_str(entry.get(str_field)):
+                        errors.append(f"{prefix} has invalid or empty '{str_field}'")
+                if "evidence_pmids" in entry and not _has_valid_evidence_pmids(entry.get("evidence_pmids")):
+                    errors.append(f"{prefix} evidence_pmids must be a non-empty list of valid PMIDs")
+
+    # 2. overlapping_indications_and_gray_zones (>= 1 entry, >= 2 distinct competing_modalities)
+    if "overlapping_indications_and_gray_zones" not in nuances:
+        errors.append(
+            "clinical_decision_nuances missing required section 'overlapping_indications_and_gray_zones'"
+        )
+    else:
+        overlaps = nuances.get("overlapping_indications_and_gray_zones")
+        if not isinstance(overlaps, list) or len(overlaps) == 0:
+            errors.append(
+                "clinical_decision_nuances.overlapping_indications_and_gray_zones must be a non-empty list"
+            )
+        else:
+            for idx, entry in enumerate(overlaps):
+                prefix = f"clinical_decision_nuances.overlapping_indications_and_gray_zones[{idx}]"
+                if not isinstance(entry, dict):
+                    errors.append(f"{prefix} must be an object")
+                    continue
+                missing = [k for k in REQUIRED_OVERLAP_KEYS if k not in entry]
+                if missing:
+                    errors.append(f"{prefix} missing keys: {missing}")
+                for str_field in (
+                    "clinical_scenario",
+                    "why_no_single_winner",
+                    "decisive_practical_factors",
+                ):
+                    if str_field in entry and not _is_nonempty_str(entry.get(str_field)):
+                        errors.append(f"{prefix} has invalid or empty '{str_field}'")
+                if "competing_modalities" in entry:
+                    comp_mods = entry.get("competing_modalities")
+                    if not isinstance(comp_mods, list):
+                        errors.append(f"{prefix} competing_modalities must be a list of >= 2 distinct modalities")
+                    elif not all(_is_nonempty_str(m) for m in comp_mods):
+                        errors.append(
+                            f"{prefix} competing_modalities must contain only non-empty strings"
+                        )
+                    else:
+                        distinct_mods = {m.strip().lower() for m in comp_mods}
+                        if len(distinct_mods) < 2:
+                            errors.append(
+                                f"{prefix} competing_modalities must contain >= 2 distinct modalities"
+                            )
+                if "evidence_pmids" in entry and not _has_valid_evidence_pmids(entry.get("evidence_pmids")):
+                    errors.append(f"{prefix} evidence_pmids must be a non-empty list of valid PMIDs")
+
+    # 3. strict_niche_or_salvage_indications (>= 0 entries; each present entry strictly validated)
+    if "strict_niche_or_salvage_indications" not in nuances:
+        errors.append(
+            "clinical_decision_nuances missing required section 'strict_niche_or_salvage_indications'"
+        )
+    else:
+        niches = nuances.get("strict_niche_or_salvage_indications")
+        if not isinstance(niches, list):
+            errors.append(
+                "clinical_decision_nuances.strict_niche_or_salvage_indications must be a list"
+            )
+        else:
+            for idx, entry in enumerate(niches):
+                prefix = f"clinical_decision_nuances.strict_niche_or_salvage_indications[{idx}]"
+                if not isinstance(entry, dict):
+                    errors.append(f"{prefix} must be an object")
+                    continue
+                missing = [k for k in REQUIRED_NICHE_KEYS if k not in entry]
+                if missing:
+                    errors.append(f"{prefix} missing keys: {missing}")
+                for str_field in (
+                    "modality",
+                    "narrow_indication_or_salvage_role",
+                    "why_not_first_line_for_all",
+                ):
+                    if str_field in entry and not _is_nonempty_str(entry.get(str_field)):
+                        errors.append(f"{prefix} has invalid or empty '{str_field}'")
+                if "evidence_pmids" in entry and not _has_valid_evidence_pmids(entry.get("evidence_pmids")):
+                    errors.append(f"{prefix} evidence_pmids must be a non-empty list of valid PMIDs")
+
+    return errors
+
+
+def validate_kb_v2(kb: dict[str, Any]) -> list[str]:
+    """Validate full schema_version '2.0' KB contract (complications + clinical_decision_nuances)."""
+    return validate_kb_complications_v2(kb) + validate_kb_clinical_nuances_v2(kb)
+
+
 def verify_universal_schema(nosology_id: str | None = None, schema_version: str = "auto") -> int:
-    """Validate that `kb_index.json` and `universal_schema.py` satisfy D-01, D-03, and COMP-04/D-09."""
+    """Validate that `kb_index.json` and `universal_schema.py` satisfy D-01, D-03, COMP-04/D-09, and HUM2-02."""
     if not nosology_id:
         discovered = discover_nosologies()
         nosology_id = discovered[0]["id"] if discovered else "prom"
@@ -1275,9 +1481,9 @@ def verify_universal_schema(nosology_id: str | None = None, schema_version: str 
         schema_version == "auto" and str(kb.get("schema_version", "")) == "2.0"
     )
     if enforce_v2:
-        v2_errors = validate_kb_complications_v2(kb)
+        v2_errors = validate_kb_v2(kb)
         if v2_errors:
-            print(f"[FAIL] Schema v2.0 complications validation failed for '{nosology_id}':")
+            print(f"[FAIL] Schema v2.0 validation failed for '{nosology_id}':")
             for err in v2_errors:
                 print(f"  - {err}")
             return 1
@@ -1330,7 +1536,7 @@ def main() -> int:
         "--schema-version",
         choices=["auto", "v1", "v2"],
         default="auto",
-        help="Schema validation mode: auto (detect), v1 (legacy compat), or v2 (strict complications)",
+        help="Schema validation mode: auto (detect), v1 (legacy compat), or v2 (strict complications + clinical nuances)",
     )
     args = parser.parse_args()
     if args.verify:
