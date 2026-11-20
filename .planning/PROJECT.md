@@ -26,10 +26,10 @@
 - ✓ Выпуск изолированных нозологических баз и отчетов `v1.x`: `prom` (O42), `metroplasty_pregnancy` (O34.2/O71/Q51), `trigger_finger` (M65.3) — Milestones 2–4 (Phases 5–16)
 - ✓ Чистый OpenXML-экспортер `src/docx_exporter.py` с версткой диссертационных отчетов, кратких руководств и сводных досье в `.docx` — Milestone 4 (`EXPORT-01`)
 - ✓ **COMP-01..04**: Гибридный API-сбор по осложнениям лечения (`src/harvester.py`), двухконтурный PRISMA-триаж `complications_safety` и приоритет Full-Text XML (`src/triage.py`), реляционная таблица `extracted_complications` с двойной осью `Clavien–Dindo`/`CTCAE` + `reversibility` (`src/schema.py`, `src/extractor_common.py`) и агрегатор/валидатор `frequent_complications` + `rare_critical_red_flags` (`src/universal_schema.py`) с read-only защитой баз `v1.x` — Validated in Phase 17 (`17-VERIFICATION.md`, `11/11 pytest`)
+- ✓ **HUM2-01..03**: Скиллы `ru-medical-humanizer v2.0` и `nosology-research-pipeline v2.0` (запрет «коробочных» выводов, модель сквозных конкурирующих методик и баланс прозы `bold_lead_bullet_ratio <= 0.35`), контракт `clinical_decision_nuances` + `validate_kb_v2()` в `src/universal_schema.py`, структурный анти-ИИ линтер `check_humanizer_v2_structure()` и Zero-Tolerance кросс-проверка `kb_index.json` `evidence_pmids` в `src/verify_reports.py` — Validated in Phase 18 (`18-VERIFICATION.md`, `17/17 pytest`)
 
 ### Active (Milestone v2.0)
 
-- [ ] **HUM2-01..03**: Обновление `ru-medical-humanizer` и `nosology-research-pipeline` против «коробочных» выводов, внедрение схемы `clinical_decision_nuances` (сквозные конкурирующие методы + нюансы выбора) и структурного анти-ИИ линтера в `src/verify_reports.py`
 - [ ] **UI-02, EXPORT-02**: Графики осложнений `Clavien–Dindo` и витрина клинических компромиссов в `app.py` (включая виджет `surgical_focus` / `complications_queries` во вкладке 4) + поддержка таблиц осложнений в `.docx` с сохранением обратной совместимости со старыми нозологиями `v1.x`
 
 ### Out of Scope
@@ -48,7 +48,7 @@
 | Decision | Rationale | Outcome |
 |----------|-----------|---------|
 | Отдельный проход API-поиска и таблица `extracted_complications` (`Clavien–Dindo`) | В общих поисковых запросах по нозологии работы по ятрогенным и редким/поздним хирургическим осложнениям теряются или смешиваются с первичными исходами | ✓ Validated in Phase 17 |
-| Замена жесткой матрицы `1 стадия = 1 метод` на модель сквозных методик и перекрывающихся показаний (`clinical_decision_nuances`) | В реальной хирургии базовые операции (например, открытый и чрескожный/УЗ-релиз) перекрывают почти весь спектр стадий, конкурируя по нюансам оснащения, рубца и опыта хирурга | — Pending (Phase 18) |
+| Замена жесткой матрицы `1 стадия = 1 метод` на модель сквозных методик и перекрывающихся показаний (`clinical_decision_nuances`) | В реальной хирургии базовые операции (например, открытый и чрескожный/УЗ-релиз) перекрывают почти весь спектр стадий, конкурируя по нюансам оснащения, рубца и опыта хирурга | ✓ Validated in Phase 18 |
 | Модернизация только движка и скиллов без пересборки прошлых отчетов | Экономит квоту API и сохраняет проверенные артефакты `v1.x`, закладывая стандарт `v2.0` для всех новых запусков | ✓ Confirmed |
 
 ## Evolution
@@ -62,4 +62,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Decisions to log? → Add to Key Decisions
 
 ---
-*Last updated: 2026-11-19 — Phase 17 complete and verified (COMP-01..COMP-04 validated)*
+*Last updated: 2026-11-20 — Phase 18 complete and verified (HUM2-01..HUM2-03 validated)*
