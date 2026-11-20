@@ -180,7 +180,7 @@ Plans:
 
 **Wave 1**
 
-- [ ] 18-01: Обновление скиллов `ru-medical-humanizer` и `nosology-research-pipeline` до `v2.0` и добавление контракта `clinical_decision_nuances` в `src/universal_schema.py`
+- [x] 18-01: Обновление скиллов `ru-medical-humanizer` и `nosology-research-pipeline` до `v2.0` и добавление контракта `clinical_decision_nuances` в `src/universal_schema.py`
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
