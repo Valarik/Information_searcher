@@ -17,6 +17,7 @@ import argparse
 import copy
 import json
 import math
+import os
 import re
 import sqlite3
 import statistics
@@ -48,6 +49,37 @@ from src.extractor_common import (
 CONFIGS_DIR = PROJECT_ROOT / "configs"
 DATA_DIR = PROJECT_ROOT / "data"
 REPORTS_DIR = PROJECT_ROOT / "reports"
+
+FROZEN_V1_NOSOLOGIES = frozenset({"prom", "metroplasty_pregnancy", "trigger_finger"})
+
+
+def get_active_project_root() -> Path:
+    """Return active workspace root (INFO_SEARCHER_ROOT env override or repository root) (T-19-05)."""
+    env_root = os.environ.get("INFO_SEARCHER_ROOT", "").strip()
+    if env_root:
+        return Path(env_root).resolve()
+    return PROJECT_ROOT.resolve()
+
+
+def _get_configs_dir() -> Path:
+    env_root = os.environ.get("INFO_SEARCHER_ROOT", "").strip()
+    if env_root:
+        return Path(env_root).resolve() / "configs"
+    return CONFIGS_DIR
+
+
+def _get_data_dir() -> Path:
+    env_root = os.environ.get("INFO_SEARCHER_ROOT", "").strip()
+    if env_root:
+        return Path(env_root).resolve() / "data"
+    return DATA_DIR
+
+
+def _get_reports_dir() -> Path:
+    env_root = os.environ.get("INFO_SEARCHER_ROOT", "").strip()
+    if env_root:
+        return Path(env_root).resolve() / "reports"
+    return REPORTS_DIR
 
 REQUIRED_UNIVERSAL_KEYS = [
     "nosology_meta",
@@ -178,14 +210,17 @@ def _connect_sqlite_readonly(db_path: Path) -> sqlite3.Connection:
     return conn
 
 
-def discover_nosologies(configs_dir: Path = CONFIGS_DIR) -> list[dict[str, Any]]:
-    """Scan `configs/*.yaml` and return metadata for all configured nosologies (CR-01, WR-08)."""
+def discover_nosologies(configs_dir: Path | None = None) -> list[dict[str, Any]]:
+    """Scan `configs/*.yaml` and return metadata for all configured nosologies (CR-01, WR-08, T-19-05)."""
     items: list[dict[str, Any]] = []
-    if not configs_dir.exists():
+    active_configs = configs_dir if configs_dir is not None else _get_configs_dir()
+    if not active_configs.exists():
         return items
-    data_root = DATA_DIR.resolve()
-    reports_root = REPORTS_DIR.resolve()
-    for cfg_path in sorted(configs_dir.glob("*.yaml")):
+    data_dir = _get_data_dir()
+    reports_dir = _get_reports_dir()
+    data_root = data_dir.resolve()
+    reports_root = reports_dir.resolve()
+    for cfg_path in sorted(active_configs.glob("*.yaml")):
         try:
             raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
         except Exception:
@@ -198,8 +233,8 @@ def discover_nosologies(configs_dir: Path = CONFIGS_DIR) -> list[dict[str, Any]]
             nos_id = validate_nosology_id(raw_nos_id)
         except ValueError:
             continue
-        db_path = (DATA_DIR / nos_id / "literature.db").resolve()
-        kb_path = (REPORTS_DIR / nos_id / "knowledge_base" / "kb_index.json").resolve()
+        db_path = (data_dir / nos_id / "literature.db").resolve()
+        kb_path = (reports_dir / nos_id / "knowledge_base" / "kb_index.json").resolve()
         if not db_path.is_relative_to(data_root) or not kb_path.is_relative_to(reports_root):
             continue
 
@@ -669,11 +704,11 @@ def build_dynamic_fallback_kb(
 
 
 def load_nosology_bundle(nosology_id: str) -> dict[str, Any]:
-    """Load the complete unified data bundle for any configured nosology (CR-03, T-18-02)."""
+    """Load the complete unified data bundle for any configured nosology (CR-03, T-18-02, T-19-05)."""
     nosology_id = validate_nosology_id(nosology_id)
-    configs_root = CONFIGS_DIR.resolve()
-    data_root = DATA_DIR.resolve()
-    reports_root = REPORTS_DIR.resolve()
+    configs_root = _get_configs_dir().resolve()
+    data_root = _get_data_dir().resolve()
+    reports_root = _get_reports_dir().resolve()
 
     cfg_path = (configs_root / f"{nosology_id}.yaml").resolve()
     db_path = (data_root / nosology_id / "literature.db").resolve()
@@ -1131,8 +1166,12 @@ def query_complications_df(db_path: Path, *, include_casuistry: bool = True) -> 
     return df
 
 
-def save_new_nosology_config(config_payload: dict[str, Any]) -> Path:
-    """Save a new nosology configuration to `configs/<id>.yaml` with normalized surgical_focus & YAML safety (T-17-05, WR-04, WR-08)."""
+def save_new_nosology_config(
+    config_payload: dict[str, Any],
+    *,
+    allow_frozen_overwrite: bool = False,
+) -> Path:
+    """Save a new nosology configuration to `configs/<id>.yaml` with normalized surgical_focus, query keys, and frozen v1.x guard (T-17-05, T-19-01, D-05.3)."""
     payload = copy.deepcopy(config_payload)
     nos_meta = payload.get("nosology")
     if not isinstance(nos_meta, dict):
@@ -1153,6 +1192,17 @@ def save_new_nosology_config(config_payload: dict[str, Any]) -> Path:
     if "treatment_profile" in payload or "treatment_profile" in nos_meta or not surgical_focus:
         nos_meta["treatment_profile"] = treatment_profile
 
+    queries_dict = payload.get("queries")
+    if isinstance(queries_dict, dict):
+        if "openalex" in queries_dict:
+            legacy_openalex = queries_dict.pop("openalex")
+            if not str(queries_dict.get("openalex_search") or "").strip() and legacy_openalex not in (None, ""):
+                queries_dict["openalex_search"] = legacy_openalex
+        if "clinicaltrials" in queries_dict:
+            legacy_ct = queries_dict.pop("clinicaltrials")
+            if not str(queries_dict.get("clinical_trials_condition") or "").strip() and legacy_ct not in (None, ""):
+                queries_dict["clinical_trials_condition"] = legacy_ct
+
     comp_queries = payload.get("complications_queries")
     if isinstance(comp_queries, dict):
         cleaned_queries = {
@@ -1166,10 +1216,18 @@ def save_new_nosology_config(config_payload: dict[str, Any]) -> Path:
         else:
             payload.pop("complications_queries", None)
 
-    CONFIGS_DIR.mkdir(parents=True, exist_ok=True)
-    out_path = (CONFIGS_DIR / f"{nos_id}.yaml").resolve()
-    if out_path.parent != CONFIGS_DIR.resolve():
+    target_configs = _get_configs_dir()
+    target_configs_resolved = target_configs.resolve()
+    out_path = (target_configs_resolved / f"{nos_id}.yaml").resolve()
+    if out_path.parent != target_configs_resolved:
         raise ValueError("Недопустимый путь сохранения конфигурации нозологии")
+    frozen_repo_cfg = (PROJECT_ROOT / "configs" / f"{nos_id}.yaml").resolve()
+    if out_path == frozen_repo_cfg and nos_id in FROZEN_V1_NOSOLOGIES and not allow_frozen_overwrite:
+        raise PermissionError(
+            f"Замороженная конфигурация v1.x '{nos_id}' защищена от перезаписи ({out_path}). "
+            "Для явной перезаписи передайте allow_frozen_overwrite=True."
+        )
+    target_configs.mkdir(parents=True, exist_ok=True)
     yaml_str = yaml.safe_dump(payload, allow_unicode=True, sort_keys=False)
     out_path.write_text(yaml_str, encoding="utf-8")
     return out_path
@@ -1521,9 +1579,9 @@ def verify_universal_schema(nosology_id: str | None = None, schema_version: str 
         print("[FAIL] CSV UTF-8-SIG BOM check failed.")
         return 1
 
-    from src.docx_exporter import build_docx_bytes_from_markdown
+    from src.docx_exporter import build_executive_docx_bytes
 
-    docx_bytes = build_docx_bytes_from_markdown(bundle["executive_summary_md"])
+    docx_bytes = build_executive_docx_bytes(bundle["executive_summary_md"], kb)
     if not docx_bytes.startswith(b"PK") or len(docx_bytes) < 2048:
         print("[FAIL] DOCX OpenXML export check failed.")
         return 1

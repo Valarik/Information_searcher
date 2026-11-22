@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sqlite3
 import sys
@@ -44,9 +45,13 @@ if hasattr(sys.stdout, "reconfigure"):
 
 
 def get_nosology_paths(nosology_id: str, base_dir: Path | None = None) -> dict[str, Path]:
-    """Resolve and containment-verify config/DB/report paths for a validated nosology_id (T-18-03)."""
+    """Resolve and containment-verify config/DB/report paths for a validated nosology_id (T-18-03, T-19-05)."""
     nos_id = validate_nosology_id(nosology_id)
-    root = Path(base_dir).resolve() if base_dir is not None else PROJECT_ROOT.resolve()
+    if base_dir is not None:
+        root = Path(base_dir).resolve()
+    else:
+        env_root = os.environ.get("INFO_SEARCHER_ROOT", "").strip()
+        root = Path(env_root).resolve() if env_root else PROJECT_ROOT.resolve()
 
     configs_root = (root / "configs").resolve()
     data_root = (root / "data").resolve()
@@ -827,20 +832,32 @@ def verify_all_reports(
     assert kb_json_path.exists(), f"Missing kb_index.json at {kb_json_path}!"
     kb_data = json.loads(kb_json_path.read_text(encoding="utf-8"))
     assert isinstance(kb_data, dict), f"kb_index.json must be a JSON object: {kb_json_path}"
-    assert len(kb_data.get("modules", [])) == 5, "kb_index.json must index 5 modules"
-    assert len(kb_data.get("modalities", [])) >= 8, "kb_index.json must include >= 8 treatment modalities"
 
     if schema_version == "v2" or (schema_version == "auto" and str(kb_data.get("schema_version", "")) == "2.0"):
         effective_version = "2.0"
     else:
         effective_version = "1.x"
 
+    kb_index_modules = kb_data.get("modules", [])
+    assert isinstance(kb_index_modules, list) and len(kb_index_modules) >= 5, (
+        f"kb_index.json must index >= 5 modules, got "
+        f"{len(kb_index_modules) if isinstance(kb_index_modules, list) else type(kb_index_modules).__name__}"
+    )
+    assert len(kb_data.get("modalities", [])) >= 8, "kb_index.json must include >= 8 treatment modalities"
+
+    kb_md_files = sorted(kb_dir.glob("*.md"))
+    assert len(kb_md_files) >= 5, (
+        f"Expected >= 5 KB Markdown files for '{nos_id}', found {len(kb_md_files)}"
+    )
+    assert len(kb_md_files) == len(kb_index_modules), (
+        f"KB module count mismatch for '{nos_id}': kb_index.json lists {len(kb_index_modules)}, "
+        f"found {len(kb_md_files)} .md files"
+    )
     report_files = [
         diss_path,
         sum_path,
-        *sorted(kb_dir.glob("*.md")),
+        *kb_md_files,
     ]
-    assert len(report_files) == 7, f"Expected 7 Markdown report files for '{nos_id}', found {len(report_files)}"
 
     audit_rows: list[dict[str, Any]] = []
     total_unique_pmids: set[str] = set()
