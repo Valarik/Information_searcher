@@ -2,10 +2,10 @@
 gsd_state_version: 1.0
 milestone: v2.0
 milestone_name: Профиль хирургических осложнений и клиническая де-ИИзация выводов
-status: ready_to_discuss
-stopped_at: Phase 18 complete and verified (6/6 must-haves, 17/17 pytest)
-last_updated: "2026-11-20T09:32:00.000Z"
-last_activity: 2026-11-20
+status: ready_to_plan
+stopped_at: Phase 19 context gathered (19-CONTEXT.md, D-01..D-08)
+last_updated: "2026-11-22T10:23:00.000Z"
+last_activity: 2026-11-22
 progress:
   total_phases: 3
   completed_phases: 2
@@ -27,8 +27,8 @@ See: `.planning/PROJECT.md` (updated 2026-11-20)
 
 Phase: 19 of 19 (3 of 3 in Milestone v2.0; Phases 17 & 18 Complete)
 Plan: Not started
-Status: Ready for Phase 19 (`/gsd-discuss-phase 19` / `/gsd-plan-phase 19` / `/gsd-execute-phase 19`)
-Last activity: 2026-11-20 — Phase 18 completed, code-reviewed, and verified (`18-VERIFICATION.md`: `passed`, `6/6`)
+Status: Ready for planning (`/gsd-plan-phase 19`)
+Last activity: 2026-11-22 — Phase 19 context gathered (`19-CONTEXT.md`, `D-01..D-08`)
 
 Progress: `███████░░░` 67%
 
@@ -51,6 +51,6 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-11-20T09:32:00Z
-Stopped at: Phase 18 complete and verified (6/6 must-haves, 17/17 pytest)
-Resume file: `.planning/phases/18-v2-0/18-VERIFICATION.md`
+Last session: 2026-11-22T10:23:00Z
+Stopped at: Phase 19 context gathered (19-CONTEXT.md, D-01..D-08)
+Resume file: `.planning/phases/19-app-py-docx-v2-0/19-CONTEXT.md`
