@@ -32,8 +32,8 @@
 
 ### 3. Визуализация в `app.py`, экспорт `.docx` и автотестирование движка (`UI / EXPORT`)
 
-- [ ] **UI-02**: Веб-интерфейс `app.py` отображает интерактивный профиль частых осложнений (`Clavien–Dindo`, частота по методикам, обратимость vs стойкий дефицит, тактика коррекции), таблицу `extracted_complications` в PRISMA-навигаторе с выгрузкой в `.csv` и блок клинических нюансов/перекрывающихся показаний (`clinical_decision_nuances`), не ломая рендеринг готовых нозологий `v1.x`.
-- [ ] **EXPORT-02**: Экспортер `src/docx_exporter.py` и набор автотестов (`tests/test_v2_engine.py` + `uv run app.py --self-test`) проверяют полный цикл работы движка `v2.0` (таблица осложнений, линтер де-ИИзации выводов, генерация `.docx` и обратная совместимость с существующими папками `prom`, `metroplasty_pregnancy`, `trigger_finger`).
+- [x] **UI-02**: Веб-интерфейс `app.py` отображает интерактивный профиль частых осложнений (`Clavien–Dindo`, частота по методикам, обратимость vs стойкий дефицит, тактика коррекции), таблицу `extracted_complications` в PRISMA-навигаторе с выгрузкой в `.csv` и блок клинических нюансов/перекрывающихся показаний (`clinical_decision_nuances`), не ломая рендеринг готовых нозологий `v1.x`.
+- [x] **EXPORT-02**: Экспортер `src/docx_exporter.py` и набор автотестов (`tests/test_v2_engine.py` + `uv run app.py --self-test`) проверяют полный цикл работы движка `v2.0` (таблица осложнений, линтер де-ИИзации выводов, генерация `.docx` и обратная совместимость с существующими папками `prom`, `metroplasty_pregnancy`, `trigger_finger`).
 
 ---
 
@@ -62,8 +62,8 @@
 | HUM2-01 | Phase 18 | Complete |
 | HUM2-02 | Phase 18 | Complete |
 | HUM2-03 | Phase 18 | Complete |
-| UI-02 | Phase 19 | Pending |
-| EXPORT-02 | Phase 19 | Pending |
+| UI-02 | Phase 19 | Complete |
+| EXPORT-02 | Phase 19 | Complete |
 
 **Coverage:**
 

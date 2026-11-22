@@ -136,7 +136,7 @@ Plans:
 
 - [x] **Phase 17: Сбор, PRISMA-триаж и реляционная схема частых осложнений лечения** — поддержка `surgical_focus` и `complications_queries` в `harvester.py`, тег `complications_safety` в `triage.py`, таблица SQLite `extracted_complications` и секция `frequent_complications` в `universal_schema.py`. (completed 2026-11-19)
 - [x] **Phase 18: Хуманизация `v2.0` — нелинейная логика клинического выбора и структурный анти-ИИ линтер** — обновление скиллов `ru-medical-humanizer` и `nosology-research-pipeline`, модель сквозных методик и клинических компромиссов (`clinical_decision_nuances`), структурный линтер в `verify_reports.py`. (completed 2026-11-20)
-- [ ] **Phase 19: Визуализация осложнений и клинических нюансов в `app.py`, экспорт `.docx` и автотесты `v2.0`** — графики `Clavien–Dindo` и витрина перекрывающихся показаний в `app.py`, поддержка таблиц осложнений в `docx_exporter.py` и комплект автотестов `tests/test_v2_engine.py`.
+- [x] **Phase 19: Визуализация осложнений и клинических нюансов в `app.py`, экспорт `.docx` и автотесты `v2.0`** — графики `Clavien–Dindo` и витрина перекрывающихся показаний в `app.py`, поддержка таблиц осложнений в `docx_exporter.py` и комплект автотестов `tests/test_v2_engine.py`. (completed 2026-11-22)
 
 ### Phase 17: Сбор, PRISMA-триаж и реляционная схема частых осложнений лечения
 
@@ -203,12 +203,12 @@ Plans:
 
 **Wave 1**
 
-- [ ] 19-01: Бэкенд `v2.0` экспорта MS Word (`src/docx_exporter.py`), изоляция `INFO_SEARCHER_ROOT` и нормализация YAML (`src/universal_schema.py`), поддержка 6 модулей в `src/verify_reports.py`
+- [x] 19-01: Бэкенд `v2.0` экспорта MS Word (`src/docx_exporter.py`), изоляция `INFO_SEARCHER_ROOT` и нормализация YAML (`src/universal_schema.py`), поддержка 6 модулей в `src/verify_reports.py`
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
-- [ ] 19-02: Веб-интерфейс `app.py` `v2.0` — подвкладки `2.5` (`Clavien–Dindo`) и `2.6` (`clinical_decision_nuances`), таблица `extracted_complications` во вкладке 3, конфигуратор `surgical_focus` + `--read-only` аудит во вкладке 4 и расширенный `--self-test`
+- [x] 19-02: Веб-интерфейс `app.py` `v2.0` — подвкладки `2.5` (`Clavien–Dindo`) и `2.6` (`clinical_decision_nuances`), таблица `extracted_complications` во вкладке 3, конфигуратор `surgical_focus` + `--read-only` аудит во вкладке 4 и расширенный `--self-test`
 
 **Wave 3** *(blocked on Wave 2 completion)*
 
-- [ ] 19-03: Комплект сквозных автотестов `tests/test_v2_engine.py` (синтетическая фикстура `v2.0`, OpenXML DOM, `AppTest` 1–4, охрана неизменности 3 замороженных `v1.x` нозологий) и финальный прогон `pytest` + `app.py --self-test`
+- [x] 19-03: Комплект сквозных автотестов `tests/test_v2_engine.py` (синтетическая фикстура `v2.0`, OpenXML DOM, `AppTest` 1–4, охрана неизменности 3 замороженных `v1.x` нозологий) и финальный прогон `pytest` + `app.py --self-test`

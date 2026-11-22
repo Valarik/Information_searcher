@@ -27,10 +27,11 @@
 - ✓ Чистый OpenXML-экспортер `src/docx_exporter.py` с версткой диссертационных отчетов, кратких руководств и сводных досье в `.docx` — Milestone 4 (`EXPORT-01`)
 - ✓ **COMP-01..04**: Гибридный API-сбор по осложнениям лечения (`src/harvester.py`), двухконтурный PRISMA-триаж `complications_safety` и приоритет Full-Text XML (`src/triage.py`), реляционная таблица `extracted_complications` с двойной осью `Clavien–Dindo`/`CTCAE` + `reversibility` (`src/schema.py`, `src/extractor_common.py`) и агрегатор/валидатор `frequent_complications` + `rare_critical_red_flags` (`src/universal_schema.py`) с read-only защитой баз `v1.x` — Validated in Phase 17 (`17-VERIFICATION.md`, `11/11 pytest`)
 - ✓ **HUM2-01..03**: Скиллы `ru-medical-humanizer v2.0` и `nosology-research-pipeline v2.0` (запрет «коробочных» выводов, модель сквозных конкурирующих методик и баланс прозы `bold_lead_bullet_ratio <= 0.35`), контракт `clinical_decision_nuances` + `validate_kb_v2()` в `src/universal_schema.py`, структурный анти-ИИ линтер `check_humanizer_v2_structure()` и Zero-Tolerance кросс-проверка `kb_index.json` `evidence_pmids` в `src/verify_reports.py` — Validated in Phase 18 (`18-VERIFICATION.md`, `17/17 pytest`)
+- ✓ **UI-02, EXPORT-02**: Подвкладки `2.5` (`Clavien–Dindo`, 2 Plotly-графика, фильтры, Red Flags, `v1.x` fallback) и `2.6` (`clinical_decision_nuances`), таблица `extracted_complications` во вкладке 3, конфигуратор `surgical_focus` с живым предпросмотром `build_complications_queries()` и `--read-only` аудитом во вкладке 4 (`app.py`), структурированные приложения `v2.0` + строгая ECMA-376 вёрстка таблиц + защита `FROZEN_V1_NOSOLOGIES` (`src/docx_exporter.py`), и сквозной комплект автотестов `tests/test_v2_engine.py` + `app.py --self-test` с проверкой нулевых мутаций 3 замороженных нозологий `v1.x` — Validated in Phase 19 (`19-VERIFICATION.md`, `14/14 must-haves`, `25/25 pytest`)
 
 ### Active (Milestone v2.0)
 
-- [ ] **UI-02, EXPORT-02**: Графики осложнений `Clavien–Dindo` и витрина клинических компромиссов в `app.py` (включая виджет `surgical_focus` / `complications_queries` во вкладке 4) + поддержка таблиц осложнений в `.docx` с сохранением обратной совместимости со старыми нозологиями `v1.x`
+Все требования Milestone `v2.0` (`9/9`: `COMP-01..04`, `HUM2-01..03`, `UI-02`, `EXPORT-02`) выполнены и верифицированы. Готово к архивации майлстоуна или запуску новых нозологий по стандарту `v2.0`.
 
 ### Out of Scope
 
@@ -49,7 +50,8 @@
 |----------|-----------|---------|
 | Отдельный проход API-поиска и таблица `extracted_complications` (`Clavien–Dindo`) | В общих поисковых запросах по нозологии работы по ятрогенным и редким/поздним хирургическим осложнениям теряются или смешиваются с первичными исходами | ✓ Validated in Phase 17 |
 | Замена жесткой матрицы `1 стадия = 1 метод` на модель сквозных методик и перекрывающихся показаний (`clinical_decision_nuances`) | В реальной хирургии базовые операции (например, открытый и чрескожный/УЗ-релиз) перекрывают почти весь спектр стадий, конкурируя по нюансам оснащения, рубца и опыта хирурга | ✓ Validated in Phase 18 |
-| Модернизация только движка и скиллов без пересборки прошлых отчетов | Экономит квоту API и сохраняет проверенные артефакты `v1.x`, закладывая стандарт `v2.0` для всех новых запусков | ✓ Confirmed |
+| Модернизация только движка и скиллов без пересборки прошлых отчетов | Экономит квоту API и сохраняет проверенные артефакты `v1.x`, закладывая стандарт `v2.0` для всех новых запусков | ✓ Validated in Phases 17–19 (0 mutations across `prom`, `metroplasty_pregnancy`, `trigger_finger`) |
+| Единые приложения `v2.0` в `executive_summary.docx` и `full_clinical_dossier.docx` + строгая ECMA-376 вёрстка таблиц | Гарантирует идентичность сводок осложнений (`Clavien–Dindo`) и клинических компромиссов между CLI и UI без дублирования текста диссертации и с читаемым переносом многостраничных таблиц | ✓ Validated in Phase 19 |
 
 ## Evolution
 
@@ -62,4 +64,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Decisions to log? → Add to Key Decisions
 
 ---
-*Last updated: 2026-11-20 — Phase 18 complete and verified (HUM2-01..HUM2-03 validated)*
+*Last updated: 2026-11-22 — Phase 19 complete and verified (UI-02, EXPORT-02 validated; Milestone v2.0 9/9 complete)*
