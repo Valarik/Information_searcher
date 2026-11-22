@@ -34,7 +34,6 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
-import yaml
 
 from src.docx_exporter import (
     build_docx_bytes_from_markdown,
@@ -782,6 +781,16 @@ def _render_subtab_clinical_nuances(kb: dict[str, Any]) -> None:
                 st.caption(f"Доказательная база: {_format_pmid_links_md(ni.get('evidence_pmids'))}")
 
 
+def _format_text_or_list(value: Any) -> str:
+    """Format scalar text or list of strings cleanly for tables and cards (v1.x trigger_finger compatibility)."""
+    if isinstance(value, list):
+        return "; ".join(str(x).strip() for x in value if str(x).strip()) or "—"
+    if value is None:
+        return "—"
+    text = str(value).strip()
+    return text or "—"
+
+
 def render_tab_clinical_matrix(bundle: dict[str, Any]) -> None:
     """Tab 2: Universal Clinical Matrix (Stages, Etiology/Pathogenesis, Modalities, Comparator, Complications, Nuances)."""
     kb = bundle["kb_index"]
@@ -802,60 +811,77 @@ def render_tab_clinical_matrix(bundle: dict[str, Any]) -> None:
 
     with sub1:
         staging = kb.get("staging_and_classification", {})
-        st.markdown(f"#### {staging.get('classification_name', 'Классификация стадий тяжести')}")
-        st.caption(f"**Шкала измерения:** {staging.get('metric_label', '—')}")
+        st.markdown(
+            f"#### {staging.get('classification_name') or staging.get('system_name') or 'Классификация стадий тяжести'}"
+        )
+        st.caption(
+            f"**Шкала измерения:** {staging.get('metric_label') or staging.get('reference') or '—'}"
+        )
         stages_list = staging.get("stages", [])
         if stages_list:
             df_stages = pd.DataFrame(stages_list)
-            fig_stg = go.Figure()
-            fig_stg.add_trace(
-                go.Bar(
-                    name="Доля в общей популяции (%)",
-                    x=df_stages["stage_code"],
-                    y=df_stages["population_share_num"],
-                    text=df_stages["population_share"],
-                    textposition="auto",
-                    marker_color="#3b82f6",
+            if {"stage_code", "population_share_num", "interventional_share_num"}.issubset(
+                df_stages.columns
+            ):
+                fig_stg = go.Figure()
+                fig_stg.add_trace(
+                    go.Bar(
+                        name="Доля в общей популяции (%)",
+                        x=df_stages["stage_code"],
+                        y=df_stages["population_share_num"],
+                        text=df_stages.get("population_share"),
+                        textposition="auto",
+                        marker_color="#3b82f6",
+                    )
                 )
-            )
-            fig_stg.add_trace(
-                go.Bar(
-                    name="Доля среди направляемых на вмешательство (%)",
-                    x=df_stages["stage_code"],
-                    y=df_stages["interventional_share_num"],
-                    text=df_stages["interventional_share"],
-                    textposition="auto",
-                    marker_color="#dc2626",
+                fig_stg.add_trace(
+                    go.Bar(
+                        name="Доля среди направляемых на вмешательство (%)",
+                        x=df_stages["stage_code"],
+                        y=df_stages["interventional_share_num"],
+                        text=df_stages.get("interventional_share"),
+                        textposition="auto",
+                        marker_color="#dc2626",
+                    )
                 )
-            )
-            fig_stg.update_layout(
-                barmode="group",
-                title="Популяционная структура стадий против структуры хирургического/интервенционного потока",
-                yaxis_title="Доля пациентов (%)",
-                height=380,
-                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-            )
-            st.plotly_chart(fig_stg, width="stretch")
+                fig_stg.update_layout(
+                    barmode="group",
+                    title="Популяционная структура стадий против структуры хирургического/интервенционного потока",
+                    yaxis_title="Доля пациентов (%)",
+                    height=380,
+                    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+                )
+                st.plotly_chart(fig_stg, width="stretch")
 
-            disp_stages = df_stages[
-                [
-                    "stage_code",
-                    "threshold",
-                    "population_share",
-                    "interventional_share",
-                    "natural_progression",
-                    "clinical_description",
-                ]
-            ].rename(
-                columns={
-                    "stage_code": "Стадия / степень",
-                    "threshold": "Критерий / порог",
-                    "population_share": "Доля в популяции",
-                    "interventional_share": "Доля в хирургии/интервенциях",
-                    "natural_progression": "Естественное прогрессирование без лечения",
-                    "clinical_description": "Клинико-анатомическая характеристика",
-                }
-            )
+            canonical_stage_cols = [
+                "stage_code",
+                "threshold",
+                "population_share",
+                "interventional_share",
+                "natural_progression",
+                "clinical_description",
+            ]
+            if set(canonical_stage_cols).issubset(df_stages.columns):
+                disp_stages = df_stages[canonical_stage_cols].rename(
+                    columns={
+                        "stage_code": "Стадия / степень",
+                        "threshold": "Критерий / порог",
+                        "population_share": "Доля в популяции",
+                        "interventional_share": "Доля в хирургии/интервенциях",
+                        "natural_progression": "Естественное прогрессирование без лечения",
+                        "clinical_description": "Клинико-анатомическая характеристика",
+                    }
+                )
+            else:
+                disp_stages = df_stages.rename(
+                    columns={
+                        "stage": "Стадия / степень",
+                        "criterion": "Критерий / порог",
+                        "pathology_feature": "Патоморфологическая характеристика",
+                        "indication_for_treatment": "Показания к лечению",
+                        "recommended_first_line": "Рекомендуемая тактика первой линии",
+                    }
+                )
             st.dataframe(disp_stages, width="stretch", hide_index=True)
 
         st.divider()
@@ -864,27 +890,49 @@ def render_tab_clinical_matrix(bundle: dict[str, Any]) -> None:
         subtypes_list = anat.get("subtypes", [])
         if subtypes_list:
             df_sub = pd.DataFrame(subtypes_list)
-            fig_sub = px.bar(
-                df_sub,
-                x="share_num",
-                y="locus_or_subtype",
-                color="category",
-                orientation="h",
-                text="share_pct",
-                title="Частота вовлечения анатомических локализаций и прогностических подтипов",
-                labels={
-                    "share_num": "Средняя доля (%)",
-                    "locus_or_subtype": "Локализация / подтип",
-                    "category": "Категория",
-                },
-                height=380,
-            )
-            fig_sub.update_layout(yaxis=dict(autorange="reversed"))
-            st.plotly_chart(fig_sub, width="stretch")
+            if "share_num" not in df_sub.columns and "frequency_num" in df_sub.columns:
+                df_sub["share_num"] = df_sub["frequency_num"]
+            if "share_pct" not in df_sub.columns and "frequency_pct" in df_sub.columns:
+                df_sub["share_pct"] = df_sub["frequency_pct"]
+            if "locus_or_subtype" not in df_sub.columns:
+                if "code" in df_sub.columns:
+                    df_sub["locus_or_subtype"] = df_sub["code"]
+                elif "name" in df_sub.columns:
+                    df_sub["locus_or_subtype"] = df_sub["name"]
+            if "category" not in df_sub.columns:
+                df_sub["category"] = "Локализация / подтип"
+            if "rank" not in df_sub.columns:
+                df_sub["rank"] = list(range(1, len(df_sub) + 1))
+            if "prognostic_impact" not in df_sub.columns:
+                df_sub["prognostic_impact"] = df_sub.get(
+                    "clinical_note", df_sub.get("name", "—")
+                )
 
-            disp_sub = df_sub[
-                ["rank", "category", "locus_or_subtype", "share_pct", "prognostic_impact"]
-            ].rename(
+            if {"share_num", "locus_or_subtype", "category"}.issubset(df_sub.columns):
+                fig_sub = px.bar(
+                    df_sub,
+                    x="share_num",
+                    y="locus_or_subtype",
+                    color="category",
+                    orientation="h",
+                    text="share_pct" if "share_pct" in df_sub.columns else None,
+                    title="Частота вовлечения анатомических локализаций и прогностических подтипов",
+                    labels={
+                        "share_num": "Средняя доля (%)",
+                        "locus_or_subtype": "Локализация / подтип",
+                        "category": "Категория",
+                    },
+                    height=380,
+                )
+                fig_sub.update_layout(yaxis=dict(autorange="reversed"))
+                st.plotly_chart(fig_sub, width="stretch")
+
+            sub_cols = [
+                c
+                for c in ["rank", "category", "locus_or_subtype", "share_pct", "prognostic_impact"]
+                if c in df_sub.columns
+            ]
+            disp_sub = df_sub[sub_cols].rename(
                 columns={
                     "rank": "Ранг",
                     "category": "Уровень",
@@ -899,14 +947,19 @@ def render_tab_clinical_matrix(bundle: dict[str, Any]) -> None:
         st.markdown("#### 🧬 Этиологические факторы риска и протективные модификаторы")
         factors = kb.get("etiology_and_risk_factors", [])
         if factors:
-            df_fac = pd.DataFrame(factors).rename(
+            df_fac = pd.DataFrame(factors)
+            if "evidence_pmids" in df_fac.columns:
+                df_fac["evidence_pmids"] = df_fac["evidence_pmids"].apply(_format_text_or_list)
+            df_fac = df_fac.rename(
                 columns={
                     "factor_name": "Фактор",
+                    "factor": "Фактор",
                     "category": "Категория",
                     "direction": "Направленность",
                     "effect_size": "Сила эффекта (OR / HR / h²)",
                     "clinical_notes": "Клиническое значение",
                     "mechanism": "Патогенетический механизм",
+                    "evidence_pmids": "PMID",
                 }
             )
             st.dataframe(df_fac, width="stretch", hide_index=True)
@@ -921,26 +974,47 @@ def render_tab_clinical_matrix(bundle: dict[str, Any]) -> None:
         st.divider()
         st.markdown("#### 🔄 Фазы патогенеза и точки приложения терапии (терапевтические окна)")
         for ph in kb.get("pathogenesis_phases", []):
-            with st.expander(f"**{ph.get('phase_name')}**", expanded=True):
+            ph_title = ph.get("phase_name") or ph.get("phase") or ph.get("name") or "Фаза патогенеза"
+            ph_events = ph.get("cellular_and_tissue_events") or ph.get("histology") or "—"
+            ph_corr = ph.get("clinical_correlate") or ph.get("clinical_manifestation") or "—"
+            ph_window = ph.get("therapeutic_window") or ph.get("molecules_and_mediators") or "—"
+            with st.expander(f"**{ph_title}**", expanded=True):
                 c_a, c_b = st.columns(2)
-                c_a.markdown(f"**Клеточные и матриксные процессы:**\n\n{ph.get('cellular_and_tissue_events')}")
+                c_a.markdown(f"**Клеточные и матриксные процессы:**\n\n{ph_events}")
                 c_b.markdown(
-                    f"**Клинический коррелят:**\n\n{ph.get('clinical_correlate')}\n\n"
-                    f"🎯 **Терапевтическое окно:** {ph.get('therapeutic_window')}"
+                    f"**Клинический коррелят:**\n\n{ph_corr}\n\n"
+                    f"🎯 **Терапевтическое окно / медиаторы:** {ph_window}"
                 )
 
     with sub3:
         nat = kb.get("natural_history_and_dynamics", {})
         defs = nat.get("definitions", {})
         st.markdown("#### 🧭 Стандартизованные определения исходов и динамики заболевания")
-        st.info(f"**Естественное развитие без инвазивного лечения:** {nat.get('untreated_course_summary', '—')}")
+        untreated_txt = (
+            nat.get("untreated_course_summary")
+            or nat.get("progression_to_pip_contracture")
+            or nat.get("spontaneous_resolution_adults")
+            or "—"
+        )
+        st.info(f"**Естественное развитие без инвазивного лечения:** {untreated_txt}")
 
-        d1, d2 = st.columns(2)
-        d1.success(f"✅ **Первичная эффективность и ремиссия:**\n\n{defs.get('primary_remission', '—')}")
-        d2.warning(f"🔁 **Истинный рецидив (Relapse):**\n\n{defs.get('true_recurrence', '—')}")
-        d3, d4 = st.columns(2)
-        d3.error(f"📈 **Процедив (Прогрессирование / Распространение):**\n\n{defs.get('procediv_progression', '—')}")
-        d4.info(f"⏳ **Естественное течение (Natural History):**\n\n{defs.get('natural_history', '—')}")
+        if isinstance(defs, dict) and defs:
+            d1, d2 = st.columns(2)
+            d1.success(f"✅ **Первичная эффективность и ремиссия:**\n\n{defs.get('primary_remission', '—')}")
+            d2.warning(f"🔁 **Истинный рецидив (Relapse):**\n\n{defs.get('true_recurrence', '—')}")
+            d3, d4 = st.columns(2)
+            d3.error(f"📈 **Процедив (Прогрессирование / Распространение):**\n\n{defs.get('procediv_progression', '—')}")
+            d4.info(f"⏳ **Естественное течение (Natural History):**\n\n{defs.get('natural_history', '—')}")
+        else:
+            d1, d2 = st.columns(2)
+            d1.success(
+                f"✅ **Спонтанное разрешение:**\n\n{nat.get('spontaneous_resolution_adults', '—')}"
+            )
+            d2.warning(
+                f"⏳ **Динамика послеоперационного периода:**\n\n{nat.get('postoperative_pip_6_month_phenomenon', '—')}"
+            )
+            if nat.get("untreated_complications"):
+                st.error(f"📈 **Осложнения без лечения:**\n\n{nat.get('untreated_complications')}")
 
         modalities = kb.get("modalities", [])
         if modalities:
@@ -982,15 +1056,16 @@ def render_tab_clinical_matrix(bundle: dict[str, Any]) -> None:
                     marker_color="#f59e0b",
                 )
             )
-            fig_5y.add_trace(
-                go.Bar(
-                    name="Повторные вмешательства к 5 годам (%)",
-                    x=df_filt["name"],
-                    y=df_filt["reintervention_5y_num"],
-                    text=df_filt["reintervention_5y"],
-                    marker_color="#6366f1",
+            if "reintervention_5y_num" in df_filt.columns:
+                fig_5y.add_trace(
+                    go.Bar(
+                        name="Повторные вмешательства к 5 годам (%)",
+                        x=df_filt["name"],
+                        y=df_filt["reintervention_5y_num"],
+                        text=df_filt.get("reintervention_5y"),
+                        marker_color="#6366f1",
+                    )
                 )
-            )
             fig_5y.update_layout(
                 barmode="group",
                 title="5-летние исходы по методикам: Стойкая ремиссия vs Истинный рецидив vs Процедив vs Повторные операции",
@@ -1025,7 +1100,11 @@ def render_tab_clinical_matrix(bundle: dict[str, Any]) -> None:
                 )
                 st.plotly_chart(fig_traj, width="stretch")
 
-            disp_mod = df_filt[
+            df_mod_disp = df_filt.copy()
+            for list_col in ("pros", "cons"):
+                if list_col in df_mod_disp.columns:
+                    df_mod_disp[list_col] = df_mod_disp[list_col].apply(_format_text_or_list)
+            disp_mod = df_mod_disp[
                 [
                     "group",
                     "name",
@@ -1105,8 +1184,8 @@ def render_tab_clinical_matrix(bundle: dict[str, Any]) -> None:
                             f"- **Осложнения:** {mod['complications_profile']}\n"
                             f"- **Реабилитация:** `{mod['recovery_time']}`"
                         )
-                        st.success(f"➕ **Плюсы:** {mod['pros']}")
-                        st.error(f"➖ **Минусы:** {mod['cons']}")
+                        st.success(f"➕ **Плюсы:** {_format_text_or_list(mod.get('pros'))}")
+                        st.error(f"➖ **Минусы:** {_format_text_or_list(mod.get('cons'))}")
 
         st.divider()
         st.markdown("#### 🔬 Первичные клинические доказательства из базы SQLite (`extracted_clinical_evidence`)")
@@ -1150,13 +1229,14 @@ def render_tab_clinical_matrix(bundle: dict[str, Any]) -> None:
 
 
 def render_tab_prisma_explorer(bundle: dict[str, Any]) -> None:
-    """Tab 3: Literature & PRISMA SQLite Explorer across articles, clinical, mechanisms, and trials."""
+    """Tab 3: Literature & PRISMA SQLite Explorer across articles, clinical, mechanisms, trials, and complications."""
     nos_id = bundle["nosology_id"]
     db_path_str = str(bundle["db_path"])
     df_art = cached_articles(db_path_str, included_only=True)
     df_clin = cached_clinical_evidence(db_path_str)
     df_mech = cached_mechanisms(db_path_str)
     df_trials = cached_trials(db_path_str)
+    df_comp_all = cached_complications(db_path_str, include_casuistry=True)
 
     st.subheader("📚 Доказательная база и PRISMA-навигатор (SQLite Explorer)")
     with st.expander("📋 Показать сводный отчёт PRISMA (`prisma_stats.md`)", expanded=False):
@@ -1210,15 +1290,19 @@ def render_tab_prisma_explorer(bundle: dict[str, Any]) -> None:
             f"2. Извлечённые клинические доказательства ({len(df_clin)})",
             f"3. Извлечённые этиопатогенетические механизмы ({len(df_mech)})",
             f"4. Реестр клинических исследований ClinicalTrials.gov ({len(df_trials)})",
+            f"5. Извлечённые осложнения лечения (extracted_complications) ({len(df_comp_all)})",
         ],
         horizontal=True,
         key="tab3_table_choice",
     )
 
     if table_choice.startswith("1."):
+        if df_art.empty:
+            st.info("В базе данных пока нет включённых статей PRISMA (`articles`: 0 записей).")
+            return
         f1, f2, f3 = st.columns([1, 1, 2])
         with f1:
-            tiers = sorted(df_art["evidence_tier"].dropna().unique().tolist()) if not df_art.empty else []
+            tiers = sorted(df_art["evidence_tier"].dropna().unique().tolist())
             sel_tiers = st.multiselect("Уровень Tier:", options=tiers, default=tiers, key="t3_art_tiers")
         with f2:
             xml_only = st.checkbox("Только с полнотекстом PMC XML", value=False, key="t3_art_xml")
@@ -1272,6 +1356,9 @@ def render_tab_prisma_explorer(bundle: dict[str, Any]) -> None:
         )
 
     elif table_choice.startswith("2."):
+        if df_clin.empty:
+            st.info("В базе данных пока нет извлечённых клинических доказательств (`extracted_clinical_evidence`: 0 записей).")
+            return
         c1, c2 = st.columns(2)
         with c1:
             grps = ["Все"] + sorted(df_clin["intervention_group"].dropna().unique().tolist())
@@ -1300,6 +1387,9 @@ def render_tab_prisma_explorer(bundle: dict[str, Any]) -> None:
         )
 
     elif table_choice.startswith("3."):
+        if df_mech.empty:
+            st.info("В базе данных пока нет извлечённых патогенетических механизмов (`extracted_mechanisms`: 0 записей).")
+            return
         c1, c2 = st.columns(2)
         with c1:
             cats = ["Все"] + sorted(df_mech["category"].dropna().unique().tolist())
@@ -1327,7 +1417,10 @@ def render_tab_prisma_explorer(bundle: dict[str, Any]) -> None:
             key="dl_csv_mech",
         )
 
-    else:
+    elif table_choice.startswith("4."):
+        if df_trials.empty:
+            st.info("В базе данных пока нет протоколов ClinicalTrials.gov (`clinical_trials`: 0 записей).")
+            return
         c1, c2 = st.columns(2)
         with c1:
             statuses = ["Все"] + sorted(df_trials["overall_status"].dropna().unique().tolist())
@@ -1362,32 +1455,217 @@ def render_tab_prisma_explorer(bundle: dict[str, Any]) -> None:
             key="dl_csv_trials",
         )
 
+    else:
+        if df_comp_all.empty:
+            st.info(
+                "В базе данных этой нозологии нет записей в таблице `extracted_complications` "
+                "(0 записей, режим строго read-only; характерно для архивных нозологий `v1.x`)."
+            )
+            return
+
+        show_casuistry = st.checkbox(
+            "Показать редкую казуистику (Tier 4 / N<20)",
+            value=False,
+            key="t3_comp_casuistry",
+        )
+        df_comp = cached_complications(db_path_str, include_casuistry=show_casuistry)
+
+        # Derive multiselect options/defaults strictly from full df_comp_all so toggling casuistry
+        # never hides casuistry-only modalities/grades due to stale session_state defaults.
+        mod_opts = list(dict.fromkeys(df_comp_all["modality"].dropna().astype(str).tolist()))
+        raw_cds = list(dict.fromkeys(df_comp_all["clavien_dindo_grade"].dropna().astype(str).tolist()))
+        cd_opts = [g for g in CLAVIEN_DINDO_ORDER if g in raw_cds] + [
+            g for g in raw_cds if g not in CLAVIEN_DINDO_ORDER
+        ]
+        raw_revs = list(dict.fromkeys(df_comp_all["reversibility"].dropna().astype(str).tolist()))
+        rev_opts = [r for r in VALID_REVERSIBILITY if r in raw_revs] + [
+            r for r in raw_revs if r not in VALID_REVERSIBILITY
+        ]
+        raw_classes = list(dict.fromkeys(df_comp_all["event_class"].dropna().astype(str).tolist()))
+        class_opts = [c for c in VALID_EVENT_CLASS if c in raw_classes] + [
+            c for c in raw_classes if c not in VALID_EVENT_CLASS
+        ]
+
+        cf1, cf2, cf3, cf4 = st.columns(4)
+        sel_mods = cf1.multiselect(
+            "Методика:",
+            options=mod_opts,
+            default=mod_opts,
+            key="t3_comp_mod",
+        )
+        sel_cds = cf2.multiselect(
+            "Clavien–Dindo:",
+            options=cd_opts,
+            default=cd_opts,
+            key="t3_comp_cd",
+        )
+        sel_revs = cf3.multiselect(
+            "Обратимость:",
+            options=rev_opts,
+            default=rev_opts,
+            format_func=lambda v: REVERSIBILITY_LABELS_RU.get(v, v),
+            key="t3_comp_rev",
+        )
+        sel_classes = cf4.multiselect(
+            "Класс события:",
+            options=class_opts,
+            default=class_opts,
+            format_func=lambda v: EVENT_CLASS_LABELS_RU.get(v, v),
+            key="t3_comp_class",
+        )
+        kw_comp = st.text_input(
+            "Поиск по осложнению, анатомическому субстрату, профилактике/лечению или PMID:",
+            value="",
+            key="t3_comp_kw",
+        )
+
+        if df_comp.empty:
+            st.info(
+                "Все записи таблицы `extracted_complications` в этой базе относятся к редкой казуистике "
+                "(`Tier 4 / N<20`). Включите флажок «Показать редкую казуистику (Tier 4 / N<20)», чтобы отобразить их."
+            )
+            return
+
+        view = df_comp.copy()
+        if sel_mods:
+            view = view[view["modality"].astype(str).isin(sel_mods)]
+        if sel_cds:
+            view = view[view["clavien_dindo_grade"].astype(str).isin(sel_cds)]
+        if sel_revs:
+            view = view[view["reversibility"].astype(str).isin(sel_revs)]
+        if sel_classes:
+            view = view[view["event_class"].astype(str).isin(sel_classes)]
+        if kw_comp.strip():
+            q = kw_comp.strip().lower()
+            mask = (
+                view["complication_name"].fillna("").astype(str).str.lower().str.contains(q, regex=False)
+                | view["anatomical_substrate"].fillna("").astype(str).str.lower().str.contains(q, regex=False)
+                | view["prevention_and_management"].fillna("").astype(str).str.lower().str.contains(q, regex=False)
+                | view["modality"].fillna("").astype(str).str.lower().str.contains(q, regex=False)
+                | view["pmid"].fillna("").astype(str).str.contains(q, regex=False)
+            )
+            view = view[mask]
+
+        view["event_class_ru"] = view["event_class"].map(
+            lambda v: EVENT_CLASS_LABELS_RU.get(str(v), str(v or "—"))
+        )
+        view["reversibility_ru"] = view["reversibility"].map(
+            lambda v: REVERSIBILITY_LABELS_RU.get(str(v), str(v or "—"))
+        )
+
+        comp_cols = [
+            "pmid",
+            "first_author_year",
+            "evidence_tier",
+            "modality",
+            "complication_name",
+            "event_class_ru",
+            "clavien_dindo_grade",
+            "frequency_pct",
+            "reversibility_ru",
+            "time_window",
+            "anatomical_substrate",
+            "prevention_and_management",
+            "sample_size",
+            "is_rare_casuistry",
+            "pubmed_url",
+            "doi_url",
+        ]
+        disp_comp = view[comp_cols].copy()
+
+        st.caption(
+            f"Найдено записей осложнений: **{len(disp_comp)}** из **{len(df_comp)}** "
+            f"(всего в БД с казуистикой: **{len(df_comp_all)}**)"
+        )
+        st.dataframe(
+            disp_comp,
+            width="stretch",
+            hide_index=True,
+            column_config={
+                "pmid": st.column_config.Column("PMID"),
+                "first_author_year": st.column_config.Column("Автор и год"),
+                "evidence_tier": st.column_config.Column("Tier"),
+                "modality": st.column_config.Column("Методика"),
+                "complication_name": st.column_config.Column("Осложнение"),
+                "event_class_ru": st.column_config.Column("Класс события"),
+                "clavien_dindo_grade": st.column_config.Column("Clavien–Dindo"),
+                "frequency_pct": st.column_config.Column("Частота (%)"),
+                "reversibility_ru": st.column_config.Column("Обратимость"),
+                "time_window": st.column_config.Column("Окно разрешения"),
+                "anatomical_substrate": st.column_config.Column("Анатомический субстрат"),
+                "prevention_and_management": st.column_config.Column("Профилактика и лечение"),
+                "sample_size": st.column_config.Column("Выборка N"),
+                "is_rare_casuistry": st.column_config.Column("Казуистика"),
+                "pubmed_url": st.column_config.LinkColumn("PubMed", display_text="Открыть PubMed"),
+                "doi_url": st.column_config.LinkColumn("DOI", display_text="Открыть DOI"),
+            },
+        )
+        csv_view = disp_comp.rename(
+            columns={
+                "pmid": "PMID",
+                "first_author_year": "Автор и год",
+                "evidence_tier": "Tier",
+                "modality": "Методика",
+                "complication_name": "Осложнение",
+                "event_class_ru": "Класс события",
+                "clavien_dindo_grade": "Clavien–Dindo",
+                "frequency_pct": "Частота (%)",
+                "reversibility_ru": "Обратимость",
+                "time_window": "Окно разрешения",
+                "anatomical_substrate": "Анатомический субстрат",
+                "prevention_and_management": "Профилактика и лечение",
+                "sample_size": "Выборка N",
+                "is_rare_casuistry": "Казуистика (Tier 4 / N<20)",
+                "pubmed_url": "PubMed URL",
+                "doi_url": "DOI URL",
+            }
+        )
+        st.download_button(
+            "📥 Скачать извлечённые осложнения (.csv)",
+            data=dataframe_to_csv_bytes(csv_view),
+            file_name=f"{nos_id}_extracted_complications.csv",
+            mime="text/csv",
+            key="dl_csv_comp",
+        )
+
 
 def render_tab_configurator_and_audit(bundle: dict[str, Any]) -> None:
-    """Tab 4: Verification Audit Certificate & New Nosology YAML Configurator."""
+    """Tab 4: Read-Only Verification Audit Certificate & v2.0 New Nosology YAML Configurator (D-05, T-19-01, T-19-03)."""
     st.subheader("🛡️ Аудит верификации ссылок и Конфигуратор новых нозологий")
     col_audit, col_cfg = st.columns([1, 1])
 
     with col_audit:
         st.markdown("#### ✅ Сертификат верификации (`Zero-Tolerance Gate`)")
-        if st.button("🔄 Запустить повторный аудит `verify_reports.py --verify`", key="btn_run_verify"):
-            res = subprocess.run(
-                [
-                    sys.executable,
-                    str(PROJECT_ROOT / "src" / "verify_reports.py"),
-                    "--nosology",
-                    bundle["nosology_id"],
-                    "--verify",
-                ],
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-            )
-            if res.returncode == 0:
-                st.success("Аудит успешно пройден: 0 галлюцинаций и 0 запрещённых ИИ-штампов.")
-            else:
-                st.error("Обнаружены замечания при проверке.")
-            st.code(res.stdout + ("\n" + res.stderr if res.stderr else ""))
+        if st.button(
+            "🔄 Запустить повторный аудит verify_reports.py --verify --read-only",
+            key="btn_run_verify",
+        ):
+            try:
+                safe_nos_id = validate_nosology_id(bundle["nosology_id"])
+                res = subprocess.run(
+                    [
+                        sys.executable,
+                        str(PROJECT_ROOT / "src" / "verify_reports.py"),
+                        "--nosology",
+                        safe_nos_id,
+                        "--verify",
+                        "--read-only",
+                    ],
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    shell=False,
+                    timeout=60,
+                )
+                if res.returncode == 0:
+                    st.success("Аудит успешно пройден (read-only): 0 галлюцинаций и 0 запрещённых ИИ-штампов.")
+                else:
+                    st.error("Обнаружены замечания при проверке.")
+                st.code(res.stdout + ("\n" + res.stderr if res.stderr else ""))
+            except subprocess.TimeoutExpired:
+                st.error("Превышено время ожидания аудита verify_reports.py (60 с).")
+            except ValueError as exc:
+                st.error(f"Некорректный идентификатор нозологии для аудита: {exc}")
 
         if bundle["verification_audit_md"]:
             st.markdown(bundle["verification_audit_md"])
@@ -1397,45 +1675,137 @@ def render_tab_configurator_and_audit(bundle: dict[str, Any]) -> None:
     with col_cfg:
         st.markdown("#### ⚙️ Добавить новую нозологию (`configs/<id>.yaml`)")
         st.caption(
-            "Платформа полностью универсальна: создайте YAML-профиль любой нозологии, чтобы запустить 4-фазный пайплайн сбора и синтеза."
+            "Платформа полностью универсальна: настройте клинический профиль сбора осложнений (`v2.0`) и "
+            "создайте YAML-профиль любой нозологии для запуска 4-фазного пайплайна сбора и синтеза."
         )
+
+        # Reactive complications profile & query terms ABOVE st.form so preview updates immediately (D-05.1, D-05.2, Pitfall 3)
+        profile_choice = st.radio(
+            "Клинический профиль нозологии (сбор осложнений):",
+            options=[
+                "Хирургическая / смешанная (surgical_focus: true)",
+                "Чисто консервативная (surgical_focus: false, treatment_profile: conservative)",
+            ],
+            horizontal=False,
+            key="t4_profile_radio",
+        )
+        is_surgical = "surgical_focus: true" in profile_choice
+        treatment_profile = "surgical" if is_surgical else "conservative"
+
+        mesh_val = st.text_input(
+            "Термины MeSH (через запятую):",
+            value="Carpal Tunnel Syndrome, Median Neuropathy",
+            key="t4_mesh_terms",
+        )
+        core_terms_val = st.text_input(
+            "Ключевые термины нозологии (triage_rules.core_terms, через запятую):",
+            value="carpal tunnel syndrome, carpal tunnel release, median nerve decompression",
+            key="t4_core_terms",
+        )
+
+        mesh_terms_list = [m.strip() for m in mesh_val.split(",") if m.strip()]
+        core_terms_list = [t.strip() for t in core_terms_val.split(",") if t.strip()]
+        preview_cfg = {
+            "nosology": {
+                "mesh_terms": mesh_terms_list,
+                "surgical_focus": is_surgical,
+                "treatment_profile": treatment_profile,
+            },
+            "triage_rules": {"core_terms": core_terms_list},
+            "date_range": {"start_year": 2016, "end_year": 2026},
+        }
+        preview_queries = build_complications_queries(preview_cfg)
+
+        with st.container(border=True):
+            st.markdown(
+                f"**Живой предпросмотр автогенерируемых запросов осложнений** "
+                f"(профиль: `{preview_queries['profile']}`, `surgical_focus={preview_queries['surgical_focus']}`)"
+            )
+            st.caption("PubMed (`complications_queries.pubmed`):")
+            st.code(preview_queries["pubmed"], language="text")
+            st.caption("Europe PMC (`complications_queries.europepmc`):")
+            st.code(preview_queries["europepmc"], language="text")
+
         with st.form("new_nosology_form"):
-            new_id = st.text_input("ID нозологии (латиницей):", value="trigger_finger")
-            new_ru = st.text_input("Название (RU):", value="Стенозирующий лигаментит (болезнь Нотта / щёлкающий палец)")
-            new_en = st.text_input("Название (EN):", value="Trigger Finger (Stenosing Tenosynovitis)")
+            new_id = st.text_input(
+                "ID нозологии (латиницей):",
+                value="carpal_tunnel_syndrome",
+                key="t4_new_id",
+            )
+            new_ru = st.text_input(
+                "Название (RU):",
+                value="Синдром запястного канала",
+                key="t4_new_ru",
+            )
+            new_en = st.text_input(
+                "Название (EN):",
+                value="Carpal Tunnel Syndrome",
+                key="t4_new_en",
+            )
             c_icd10, c_icd11 = st.columns(2)
-            icd10_val = c_icd10.text_input("Код МКБ-10:", value="M65.3")
-            icd11_val = c_icd11.text_input("Код МКБ-11:", value="FB40.2")
-            mesh_val = st.text_input("Термины MeSH (через запятую):", value="Trigger Finger Disorder, Tenosynovitis")
+            icd10_val = c_icd10.text_input("Код МКБ-10:", value="G56.0", key="t4_icd10")
+            icd11_val = c_icd11.text_input("Код МКБ-11:", value="8C10.0", key="t4_icd11")
             pubmed_q = st.text_area(
                 "Поисковый запрос PubMed / Europe PMC:",
-                value='("Trigger Finger Disorder"[MeSH] OR "trigger finger"[tiab] OR "stenosing tenosynovitis"[tiab])',
+                value='("Carpal Tunnel Syndrome"[MeSH] OR "carpal tunnel syndrome"[tiab] OR "carpal tunnel release"[tiab])',
+                key="t4_pubmed_q",
             )
-            ct_cond = st.text_input("Условие для ClinicalTrials.gov:", value="Trigger Finger")
+            ct_cond = st.text_input(
+                "Условие для ClinicalTrials.gov:",
+                value="Carpal Tunnel Syndrome",
+                key="t4_ct_cond",
+            )
+            comp_override_pm = st.text_area(
+                "Ручное переопределение complications_queries.pubmed (опционально):",
+                value="",
+                placeholder="Оставьте пустым для автогенерации по профилю выше",
+                key="t4_comp_override_pm",
+            )
+            comp_override_epmc = st.text_area(
+                "Ручное переопределение complications_queries.europepmc (опционально):",
+                value="",
+                placeholder="Оставьте пустым для автогенерации по профилю выше",
+                key="t4_comp_override_epmc",
+            )
             submitted = st.form_submit_button("💾 Сохранить конфигурацию в `configs/`")
 
         if submitted:
-            payload = {
+            payload: dict[str, Any] = {
                 "nosology": {
                     "id": new_id.strip().lower(),
                     "name_ru": new_ru.strip(),
                     "name_en": new_en.strip(),
                     "icd10": icd10_val.strip(),
                     "icd11": icd11_val.strip(),
-                    "mesh_terms": [m.strip() for m in mesh_val.split(",") if m.strip()],
+                    "mesh_terms": mesh_terms_list,
+                    "surgical_focus": is_surgical,
+                    "treatment_profile": treatment_profile,
                 },
                 "date_range": {"start_year": 2016, "end_year": 2026},
                 "queries": {
                     "pubmed": pubmed_q.strip(),
                     "europepmc": pubmed_q.strip(),
-                    "openalex": new_en.strip(),
-                    "clinicaltrials": ct_cond.strip(),
+                    "openalex_search": new_en.strip(),
+                    "clinical_trials_condition": ct_cond.strip(),
+                },
+                "triage_rules": {
+                    "core_terms": core_terms_list,
                 },
             }
+            comp_overrides: dict[str, str] = {}
+            if comp_override_pm.strip():
+                comp_overrides["pubmed"] = comp_override_pm.strip()
+            if comp_override_epmc.strip():
+                comp_overrides["europepmc"] = comp_override_epmc.strip()
+            if comp_overrides:
+                payload["complications_queries"] = comp_overrides
+
             try:
                 saved_path = save_new_nosology_config(payload)
                 st.success(f"Конфигурация сохранена: `{saved_path}`")
-                st.code(yaml.safe_dump(payload, allow_unicode=True, sort_keys=False), language="yaml")
+                st.code(saved_path.read_text(encoding="utf-8"), language="yaml")
+            except (ValueError, PermissionError) as exc:
+                st.error(f"Ошибка сохранения: {exc}")
             except Exception as exc:
                 st.error(f"Ошибка сохранения: {exc}")
 
@@ -1445,7 +1815,7 @@ def render_tab_configurator_and_audit(bundle: dict[str, Any]) -> None:
             "uv run src/harvester.py --config configs/<id>.yaml\n"
             "uv run src/triage.py --config configs/<id>.yaml\n\n"
             "# Фаза 3–4: Компиляция библиографии, аудит и запуск веб-интерфейса\n"
-            "uv run src/verify_reports.py --compile-bibliography --verify\n"
+            "uv run src/verify_reports.py --nosology <id> --verify --read-only\n"
             "uv run streamlit run app.py",
             language="bash",
         )
@@ -1490,43 +1860,88 @@ def render_streamlit_app() -> None:
 
 
 def run_self_test() -> int:
-    """Automated headless verification of schema, SQLite queries, exports, and Streamlit AppTest (`UI-01`)."""
+    """Automated headless verification of schema, SQLite queries, exports, and Streamlit AppTest (`UI-01`, `UI-02`, `D-08.3`)."""
     import os
 
     os.environ["INFO_SEARCHER_APPTEST_ACTIVE"] = "1"
     sys.argv = [arg for arg in sys.argv if arg != "--self-test"]
 
-    print("[1/3] Running universal schema & export verification...")
+    print("[1/3] Running universal schema & export verification across all discovered nosologies...")
     discovered = discover_nosologies()
-    active_nos = discovered[0]["id"] if discovered else "prom"
-    rc = verify_universal_schema(active_nos)
-    if rc != 0:
-        return rc
+    target_nosologies = discovered if discovered else [{"id": "prom"}]
+    for item in target_nosologies:
+        rc = verify_universal_schema(item["id"])
+        if rc != 0:
+            return rc
 
-    print("[2/3] Running headless Streamlit AppTest on `app.py`...")
+    print("[2/3] Running headless Streamlit AppTest on `app.py` for all discovered nosologies...")
     from streamlit.testing.v1 import AppTest
 
     at = AppTest.from_file(str(Path(__file__).resolve()), default_timeout=60)
     at.run(timeout=60)
     if len(at.exception) > 0:
-        print(f"[FAIL] Streamlit AppTest raised {len(at.exception)} exception(s):")
+        print(f"[FAIL] Streamlit AppTest initial run raised {len(at.exception)} exception(s):")
         for exc in at.exception:
             print(exc)
         return 1
 
-    # Switch report modes in Tab 1 to ensure Mode B and Mode C also render cleanly
-    at.radio(key="tab1_report_mode").set_value("Режим Б — Краткий клинический отчёт (Executive Summary)").run(timeout=60)
-    if len(at.exception) > 0:
-        print(f"[FAIL] Mode B raised exception: {at.exception[0]}")
-        return 1
+    for item in target_nosologies:
+        nos_id = item["id"]
+        at.selectbox(key="sidebar_nosology_select").set_value(nos_id).run(timeout=60)
+        if len(at.exception) > 0:
+            print(f"[FAIL] Selecting nosology '{nos_id}' raised exception: {at.exception[0]}")
+            return 1
 
-    at.radio(key="tab1_report_mode").set_value("Режим В — Модульная база знаний (5 тематических модулей)").run(timeout=60)
-    if len(at.exception) > 0:
-        print(f"[FAIL] Mode C raised exception: {at.exception[0]}")
-        return 1
+        tab_labels = [t.label for t in at.tabs]
+        if not any("2.5" in lbl for lbl in tab_labels) or not any("2.6" in lbl for lbl in tab_labels):
+            print(f"[FAIL] Subtabs 2.5/2.6 missing for '{nos_id}': {tab_labels}")
+            return 1
+
+        mode_opts = list(at.radio(key="tab1_report_mode").options)
+        mode_a = next((o for o in mode_opts if o.startswith("Режим А")), None)
+        mode_b = next((o for o in mode_opts if o.startswith("Режим Б")), None)
+        mode_c = next((o for o in mode_opts if o.startswith("Режим В")), None)
+        if not mode_b or not mode_c:
+            print(f"[FAIL] Missing Mode B/C options for '{nos_id}': {mode_opts}")
+            return 1
+
+        at.radio(key="tab1_report_mode").set_value(mode_b).run(timeout=60)
+        if len(at.exception) > 0:
+            print(f"[FAIL] Mode B raised exception for '{nos_id}': {at.exception[0]}")
+            return 1
+
+        at.radio(key="tab1_report_mode").set_value(mode_c).run(timeout=60)
+        if len(at.exception) > 0:
+            print(f"[FAIL] Mode C raised exception for '{nos_id}': {at.exception[0]}")
+            return 1
+
+        if mode_a:
+            at.radio(key="tab1_report_mode").set_value(mode_a).run(timeout=60)
+            if len(at.exception) > 0:
+                print(f"[FAIL] Mode A reset raised exception for '{nos_id}': {at.exception[0]}")
+                return 1
+
+        t3_opts = list(at.radio(key="tab3_table_choice").options)
+        opt1 = next((o for o in t3_opts if o.startswith("1.")), None)
+        opt5 = next((o for o in t3_opts if o.startswith("5.")), None)
+        if not opt5:
+            print(f"[FAIL] Missing Tab 3 option 5 (extracted_complications) for '{nos_id}': {t3_opts}")
+            return 1
+
+        at.radio(key="tab3_table_choice").set_value(opt5).run(timeout=60)
+        if len(at.exception) > 0:
+            print(f"[FAIL] Tab 3 option 5 raised exception for '{nos_id}': {at.exception[0]}")
+            return 1
+
+        if opt1:
+            at.radio(key="tab3_table_choice").set_value(opt1).run(timeout=60)
+            if len(at.exception) > 0:
+                print(f"[FAIL] Tab 3 option 1 reset raised exception for '{nos_id}': {at.exception[0]}")
+                return 1
 
     print(
-        f"[3/3] [PASS] Streamlit AppTest rendered all 4 tabs and all 3 report modes with 0 exceptions "
+        f"[3/3] [PASS] Streamlit AppTest verified {len(target_nosologies)} nosology(ies), "
+        f"all 4 tabs + subtabs 2.5/2.6, dynamic Mode C, and Tab 3 option 5 with 0 exceptions "
         f"(metrics={len(at.metric)}, dataframes={len(at.dataframe)}, tabs={len(at.tabs)})."
     )
     return 0
