@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import io
 import json
+import math
+import os
 import re
 import sys
 import zipfile
@@ -54,15 +56,56 @@ _REVERSIBILITY_RU: Dict[str, str] = {
 
 _PMID_RE = re.compile(r"^[1-9]\d{0,8}$")
 _RED_FLAG_HEADING_RE = re.compile(
-    r"красные\s+флаги|red\s+flags|критические\s+осложнения",
+    r"красные\s+флаги|red\s+flags|редкие\s+критические\s+осложнения",
     re.IGNORECASE,
 )
 _CD_COL_HDR_RE = re.compile(r"clavien|клавьен", re.IGNORECASE)
-_CD_CRITICAL_CELL_RE = re.compile(r"(?:^|[\s(/–—-])(IV[ab]?|V)(?:$|[\s)/,;–—-])")
-_CD_SEVERE_CELL_RE = re.compile(r"(?:^|[\s(/–—-])(IIIb)(?:$|[\s)/,;–—-])")
-_CD_INLINE_CONTEXT_RE = re.compile(
-    r"Clavien[–—\-\s]*Dindo\s*(?:Grade\s*)?(IIIb|IV[ab]?|V)\b"
+_IV_THERAPY_RE = re.compile(
+    r"\bIV\s+(?:antibiotic\w*|infusion\w*|fluid\w*|therap\w*|steroid\w*|analges\w*|drug\w*|med\w*|abx|bolus\w*|line\w*|access|sedation|corticosteroid\w*|anticoagul\w*|heparin\w*|vasopressor\w*)\b",
+    re.IGNORECASE,
 )
+_CD_SINGLE_GRADE = r"(?:IV[aAbB]?|III[aAbB]?|II|I|V)"
+_CD_ANCHORED_GRADES_RE = re.compile(
+    rf"^(?:(?:Clavien[–—\-\s]*Dindo|Клавьен[–—\-\s]*Диндо)\s*)?"
+    rf"(?:(?:Grade|Class|Класс|Степен[ьи]|Ст\.?)\s*)?"
+    rf"\(?\s*(?P<grades>{_CD_SINGLE_GRADE}(?:\s*(?:[–—\-/,]|to|до|и)\s*{_CD_SINGLE_GRADE})*)"
+    rf"\s*\)?(?:$|[\s.;:,(–—\-/])",
+    re.IGNORECASE,
+)
+_CD_INLINE_CONTEXT_RE = re.compile(
+    rf"(?:Clavien[–—\-\s]*Dindo|Клавьен[–—\-\s]*Диндо)\s*"
+    rf"(?:(?:Grade|Class|Класс|Степен[ьи]|Ст\.?)\s*)?"
+    rf"\(?\s*(?P<grades>{_CD_SINGLE_GRADE}(?:\s*(?:[–—\-/,]|to|до|и)\s*{_CD_SINGLE_GRADE})*)"
+    rf"\s*\)?(?:$|[\s.;:,)–—\-/])",
+    re.IGNORECASE,
+)
+_CD_TOKEN_RE = re.compile(r"\b(IV[ab]?|III[ab]?|II|I|V)\b", re.IGNORECASE)
+
+
+def _dict_list(value: Any) -> List[Dict[str, Any]]:
+    """Return list of dict entries only when value is a list (guards against non-list truthy scalars, WR-01)."""
+    return [x for x in value if isinstance(x, dict)] if isinstance(value, list) else []
+
+
+def _safe_finite_float(value: Any) -> Optional[float]:
+    """Return finite float (rejecting bool, None, NaN, +/-inf), or None (WR-01)."""
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        fval = float(value)
+        return fval if math.isfinite(fval) else None
+    return None
+
+
+def _safe_finite_int(value: Any) -> Optional[int]:
+    """Return int from finite numeric value (rejecting bool, None, NaN, +/-inf), or None (WR-01)."""
+    fval = _safe_finite_float(value)
+    return int(fval) if fval is not None else None
+
+
+def _norm_resolved_path(path: Path) -> Path:
+    """Return resolved Path normalized for case-insensitive filesystems (CR-02)."""
+    return Path(os.path.normcase(str(path.resolve())))
 
 
 def _xml_escape(text: str) -> str:
@@ -233,11 +276,12 @@ def _build_styles_xml() -> str:
 
 
 _INLINE_TOKEN_RE = re.compile(
-    r"(\[([^\]]+)\]\((https?://[^\s\)]+)\))"  # [label](url)
-    r"|(\*\*\*(.+?)\*\*\*)"                   # ***bold italic***
-    r"|(\*\*(.+?)\*\*)"                       # **bold**
-    r"|(\*([^\*\n]+?)\*)"                     # *italic*
-    r"|(`([^`\n]+?)`)"                        # `code`
+    r"(\\(\[|\]|\*|`))"                        # escaped inline punctuation \[ \] \* \`
+    r"|(\[([^\]]+)\]\((https?://[^\s\)]+)\))"  # [label](url)
+    r"|(\*\*\*(.+?)\*\*\*)"                    # ***bold italic***
+    r"|(\*\*(.+?)\*\*)"                        # **bold**
+    r"|(\*([^\*\n]+?)\*)"                      # *italic*
+    r"|(`([^`\n]+?)`)"                         # `code`
 )
 
 
@@ -295,8 +339,17 @@ def _render_inline_runs(
                     size_half_pt=size_half_pt,
                 )
             )
-        if m.group(1):  # [label](url)
-            label, url = m.group(2), m.group(3)
+        if m.group(1):  # escaped inline punctuation \[ \] \* \`
+            out.append(
+                _render_run(
+                    m.group(2),
+                    bold=force_bold,
+                    color=force_color,
+                    size_half_pt=size_half_pt,
+                )
+            )
+        elif m.group(3):  # [label](url)
+            label, url = m.group(4), m.group(5)
             rid = rels.register_url(url)
             run_xml = _render_run(
                 label,
@@ -306,41 +359,41 @@ def _render_inline_runs(
                 underline=True,
             )
             out.append(f'<w:hyperlink r:id="{rid}" w:history="1">{run_xml}</w:hyperlink>')
-        elif m.group(4):  # ***bold italic***
+        elif m.group(6):  # ***bold italic***
             out.append(
                 _render_run(
-                    m.group(5),
+                    m.group(7),
                     bold=True,
                     italic=True,
                     color=force_color,
                     size_half_pt=size_half_pt,
                 )
             )
-        elif m.group(6):  # **bold**
+        elif m.group(8):  # **bold**
             out.append(
                 _render_run(
-                    m.group(7),
+                    m.group(9),
                     bold=True,
                     color=force_color,
                     size_half_pt=size_half_pt,
                 )
             )
-        elif m.group(8):  # *italic*
+        elif m.group(10):  # *italic*
             out.append(
                 _render_run(
-                    m.group(9),
+                    m.group(11),
                     bold=force_bold,
                     italic=True,
                     color=force_color,
                     size_half_pt=size_half_pt,
                 )
             )
-        elif m.group(10):  # `code`
+        elif m.group(12):  # `code`
             out.append(
                 _render_run(
-                    m.group(11),
+                    m.group(13),
                     bold=True,
-                    code= not force_bold,
+                    code=not force_bold,
                     color=force_color,
                     size_half_pt=size_half_pt,
                 )
@@ -360,22 +413,53 @@ def _render_inline_runs(
 
 
 def _escape_md_cell(value: Any) -> str:
-    """Safely normalize an arbitrary value for inclusion inside a Markdown pipe table cell (T-19-02)."""
-    if value is None:
+    """Safely normalize an arbitrary value for inclusion inside a Markdown pipe table cell (T-19-02, CR-03, WR-01, WR-03)."""
+    if value is None or isinstance(value, bool):
+        return "—"
+    if isinstance(value, float) and not math.isfinite(value):
         return "—"
     cleaned = " ".join(str(value).replace("\r\n", " ").replace("\r", " ").replace("\n", " ").split())
     if not cleaned:
         return "—"
-    return cleaned.replace("|", r"\|")
+    # Escape backslash first (WR-03), then pipe, then inline Markdown delimiters (CR-03)
+    return (
+        cleaned.replace("\\", r"\\")
+        .replace("|", r"\|")
+        .replace("[", r"\[")
+        .replace("]", r"\]")
+        .replace("*", r"\*")
+        .replace("`", r"\`")
+    )
 
 
 def _split_table_row(line: str) -> List[str]:
-    stripped = line.strip()
-    if stripped.startswith("|"):
-        stripped = stripped[1:]
-    if stripped.endswith("|") and not stripped.endswith(r"\|"):
-        stripped = stripped[:-1]
-    return [c.replace(r"\|", "|").strip() for c in re.split(r"(?<!\\)\|", stripped)]
+    """Split a Markdown pipe table row safely with single-pass \\ and \\| unescaping (WR-03)."""
+    s = line.strip()
+    if s.startswith("|"):
+        s = s[1:]
+    cells: List[str] = []
+    buf: List[str] = []
+    i = 0
+    n = len(s)
+    ended_with_unescaped_pipe = False
+    while i < n:
+        ch = s[i]
+        if ch == "\\" and i + 1 < n and s[i + 1] in ("|", "\\"):
+            buf.append(s[i + 1])
+            i += 2
+            continue
+        if ch == "|":
+            cells.append("".join(buf).strip())
+            buf = []
+            if i == n - 1:
+                ended_with_unescaped_pipe = True
+            i += 1
+            continue
+        buf.append(ch)
+        i += 1
+    if not ended_with_unescaped_pipe:
+        cells.append("".join(buf).strip())
+    return cells
 
 
 def _is_table_separator(line: str) -> bool:
@@ -385,29 +469,55 @@ def _is_table_separator(line: str) -> bool:
     return all(bool(re.match(r"^:?-{2,}:?$", c)) for c in cells)
 
 
+def _severity_from_grade_expr(grades_expr: str) -> Optional[str]:
+    """Return max severity ('critical' for IV/IVa/IVb/V, 'severe' for IIIb, else None) from a grade token expression (WR-02)."""
+    detected: Optional[str] = None
+    for tok in _CD_TOKEN_RE.findall(grades_expr):
+        norm = tok.upper()
+        if norm in ("IV", "IVA", "IVB", "V"):
+            return "critical"
+        if norm == "IIIB":
+            detected = "severe"
+    return detected
+
+
+def _normalize_cell_for_severity(cell: str) -> str:
+    """Strip inline Markdown escapes/formatting and intravenous therapy phrases before severity matching (WR-02)."""
+    unescaped = re.sub(r"\\([\[\]\*`])", r"\1", cell)
+    stripped = re.sub(r"[*_`]", "", unescaped).strip()
+    return _IV_THERAPY_RE.sub("", stripped).strip()
+
+
 def _classify_row_severity(
     padded_row: List[str],
     cd_col_idx: Optional[int],
     is_red_flag_table: bool,
 ) -> Optional[str]:
-    """Return 'critical' (Red Flag / Clavien-Dindo IV-V), 'severe' (IIIb), or None without stage false positives."""
+    """Return 'critical' (Red Flag / Clavien-Dindo IV-V), 'severe' (IIIb), or None without stage/IV-therapy false positives (WR-02)."""
     if is_red_flag_table:
         return "critical"
     if cd_col_idx is not None and cd_col_idx < len(padded_row):
-        clean = re.sub(r"[*_`]", "", padded_row[cd_col_idx]).strip()
-        if _CD_CRITICAL_CELL_RE.search(clean):
-            return "critical"
-        if _CD_SEVERE_CELL_RE.search(clean):
-            return "severe"
-        return None
-    detected: Optional[str] = None
-    for cell in padded_row:
-        clean = re.sub(r"[*_`]", "", cell).strip()
+        clean = _normalize_cell_for_severity(padded_row[cd_col_idx])
+        m_anchor = _CD_ANCHORED_GRADES_RE.match(clean)
+        if m_anchor:
+            return _severity_from_grade_expr(m_anchor.group("grades"))
+        detected: Optional[str] = None
         for m in _CD_INLINE_CONTEXT_RE.finditer(clean):
-            if m.group(1) == "IIIb":
-                detected = detected or "severe"
-            else:
+            sev = _severity_from_grade_expr(m.group("grades"))
+            if sev == "critical":
                 return "critical"
+            if sev == "severe":
+                detected = "severe"
+        return detected
+    detected = None
+    for cell in padded_row:
+        clean = _normalize_cell_for_severity(cell)
+        for m in _CD_INLINE_CONTEXT_RE.finditer(clean):
+            sev = _severity_from_grade_expr(m.group("grades"))
+            if sev == "critical":
+                return "critical"
+            if sev == "severe":
+                detected = "severe"
     return detected
 
 
@@ -719,17 +829,19 @@ def build_docx_bytes_from_markdown(md_text: str) -> bytes:
 
 
 def is_v2_kb_index(kb_index: Optional[Dict[str, Any]]) -> bool:
-    """Return True only when kb_index carries schema_version '2.0' or non-empty v2.0 sections."""
+    """Return True only when kb_index carries schema_version '2.0' or non-empty valid v2.0 list sections (WR-01)."""
     if not isinstance(kb_index, dict):
         return False
     if str(kb_index.get("schema_version", "")) == "2.0":
         return True
-    if kb_index.get("frequent_complications") or kb_index.get("rare_critical_red_flags"):
+    if _dict_list(kb_index.get("frequent_complications")) or _dict_list(
+        kb_index.get("rare_critical_red_flags")
+    ):
         return True
     nuances = kb_index.get("clinical_decision_nuances")
     if isinstance(nuances, dict):
         return any(
-            bool(nuances.get(sec))
+            bool(_dict_list(nuances.get(sec)))
             for sec in (
                 "universal_workhorse_modalities",
                 "overlapping_indications_and_gray_zones",
@@ -756,24 +868,18 @@ def _format_pmid_links(pmids: Any) -> str:
 
 
 def render_v2_kb_appendices_markdown(kb_index: Optional[Dict[str, Any]]) -> str:
-    """Render structured v2.0 complications, red flags, and clinical decision nuances Markdown appendices (D-06)."""
+    """Render structured v2.0 complications, red flags, and clinical decision nuances Markdown appendices (D-06, WR-01)."""
     if not is_v2_kb_index(kb_index):
         return ""
     assert isinstance(kb_index, dict)
 
-    freq_comps = [x for x in (kb_index.get("frequent_complications") or []) if isinstance(x, dict)]
-    red_flags = [x for x in (kb_index.get("rare_critical_red_flags") or []) if isinstance(x, dict)]
+    freq_comps = _dict_list(kb_index.get("frequent_complications"))
+    red_flags = _dict_list(kb_index.get("rare_critical_red_flags"))
     nuances = kb_index.get("clinical_decision_nuances")
     nuances_dict = nuances if isinstance(nuances, dict) else {}
-    workhorses = [
-        x for x in (nuances_dict.get("universal_workhorse_modalities") or []) if isinstance(x, dict)
-    ]
-    overlaps = [
-        x for x in (nuances_dict.get("overlapping_indications_and_gray_zones") or []) if isinstance(x, dict)
-    ]
-    niches = [
-        x for x in (nuances_dict.get("strict_niche_or_salvage_indications") or []) if isinstance(x, dict)
-    ]
+    workhorses = _dict_list(nuances_dict.get("universal_workhorse_modalities"))
+    overlaps = _dict_list(nuances_dict.get("overlapping_indications_and_gray_zones"))
+    niches = _dict_list(nuances_dict.get("strict_niche_or_salvage_indications"))
 
     if not any((freq_comps, red_flags, workhorses, overlaps, niches)):
         return ""
@@ -798,14 +904,10 @@ def render_v2_kb_appendices_markdown(kb_index: Optional[Dict[str, Any]]) -> str:
                 cd_cell = _escape_md_cell(entry.get("clavien_dindo_grade"))
 
                 freq_pct_str = str(entry.get("frequency_pct") or "").strip()
-                med_val = entry.get("frequency_median_num")
+                med_num = _safe_finite_float(entry.get("frequency_median_num"))
                 if freq_pct_str:
-                    if (
-                        med_val is not None
-                        and not isinstance(med_val, bool)
-                        and isinstance(med_val, (int, float))
-                    ):
-                        med_str = f"{float(med_val):g}%"
+                    if med_num is not None:
+                        med_str = f"{med_num:g}%"
                         freq_display = (
                             f"{freq_pct_str} (мед. {med_str})"
                             if med_str not in freq_pct_str
@@ -813,12 +915,8 @@ def render_v2_kb_appendices_markdown(kb_index: Optional[Dict[str, Any]]) -> str:
                         )
                     else:
                         freq_display = freq_pct_str
-                elif (
-                    med_val is not None
-                    and not isinstance(med_val, bool)
-                    and isinstance(med_val, (int, float))
-                ):
-                    freq_display = f"{float(med_val):g}%"
+                elif med_num is not None:
+                    freq_display = f"{med_num:g}%"
                 else:
                     freq_display = "—"
                 freq_cell = _escape_md_cell(freq_display)
@@ -834,12 +932,8 @@ def render_v2_kb_appendices_markdown(kb_index: Optional[Dict[str, Any]]) -> str:
 
                 anat_cell = _escape_md_cell(entry.get("anatomical_substrate"))
                 prev_cell = _escape_md_cell(entry.get("prevention_and_management"))
-                n_val = entry.get("sample_size_total")
-                n_cell = (
-                    _escape_md_cell(str(int(n_val)))
-                    if n_val is not None and not isinstance(n_val, bool) and isinstance(n_val, (int, float))
-                    else "—"
-                )
+                n_int = _safe_finite_int(entry.get("sample_size_total"))
+                n_cell = _escape_md_cell(str(n_int)) if n_int is not None else "—"
                 pmid_cell = _format_pmid_links(entry.get("evidence_pmids"))
                 parts.append(
                     f"| {mod_cell} | {comp_cell} | {cls_cell} | {cd_cell} | {freq_cell} | "
@@ -867,9 +961,9 @@ def render_v2_kb_appendices_markdown(kb_index: Optional[Dict[str, Any]]) -> str:
                 cd_cell = _escape_md_cell(entry.get("clavien_dindo_grade"))
                 freq_raw = str(entry.get("frequency_pct") or "").strip()
                 if not freq_raw:
-                    max_num = entry.get("frequency_max_num")
-                    if max_num is not None and not isinstance(max_num, bool) and isinstance(max_num, (int, float)):
-                        freq_raw = f"<{float(max_num):g}%"
+                    max_num = _safe_finite_float(entry.get("frequency_max_num"))
+                    if max_num is not None:
+                        freq_raw = f"<{max_num:g}%"
                 freq_cell = _escape_md_cell(freq_raw or None)
                 rev_raw = str(entry.get("reversibility") or "").strip()
                 rev_cell = _escape_md_cell(_REVERSIBILITY_RU.get(rev_raw, rev_raw or None))
@@ -917,9 +1011,16 @@ def render_v2_kb_appendices_markdown(kb_index: Optional[Dict[str, Any]]) -> str:
             for entry in overlaps:
                 comp_mods = entry.get("competing_modalities")
                 if isinstance(comp_mods, list):
-                    comp_mods_str = ", ".join(str(m).strip() for m in comp_mods if str(m).strip())
+                    comp_mods_str = ", ".join(
+                        str(m).strip()
+                        for m in comp_mods
+                        if m is not None
+                        and not isinstance(m, bool)
+                        and not (isinstance(m, float) and not math.isfinite(m))
+                        and str(m).strip()
+                    )
                 else:
-                    comp_mods_str = str(comp_mods or "").strip()
+                    comp_mods_str = "" if comp_mods is None or isinstance(comp_mods, bool) else str(comp_mods).strip()
                 parts.append(
                     f"| {_escape_md_cell(entry.get('clinical_scenario'))} "
                     f"| {_escape_md_cell(comp_mods_str or None)} "
@@ -986,17 +1087,33 @@ def export_nosology_docx_files(
       3. full_clinical_dossier.docx (Полное клиническое досье: Краткое руководство + Диссертация + модули БЗ + приложения v2.0)
     """
     nos_id = validate_nosology_id(nosology_slug)
-    root = (base_dir or PROJECT_ROOT).resolve()
+    root = (base_dir if base_dir is not None else PROJECT_ROOT).resolve()
     reports_root = (root / "reports").resolve()
     rep_dir = (reports_root / nos_id).resolve()
-    if not rep_dir.is_relative_to(reports_root):
-        raise ValueError(f"Reports directory escapes reports root: {rep_dir}")
 
-    if root == PROJECT_ROOT.resolve() and nos_id in FROZEN_V1_NOSOLOGIES and not allow_frozen_overwrite:
+    root_norm = _norm_resolved_path(root)
+    reports_root_norm = _norm_resolved_path(reports_root)
+    rep_dir_norm = _norm_resolved_path(rep_dir)
+
+    # CR-02 / T-19-01: Compare resolved target directory (case-normalized) against real frozen v1.x repo dir
+    frozen_repo_rep_dir_norm = _norm_resolved_path(PROJECT_ROOT / "reports" / nos_id)
+    if (
+        nos_id.lower() in FROZEN_V1_NOSOLOGIES
+        and (
+            rep_dir_norm == frozen_repo_rep_dir_norm
+            or rep_dir_norm.is_relative_to(frozen_repo_rep_dir_norm)
+        )
+        and not allow_frozen_overwrite
+    ):
         raise PermissionError(
             f"Замороженная нозология v1.x '{nos_id}' защищена от перезаписи в корневом репозитории ({rep_dir}). "
             "Для явной перезаписи укажите allow_frozen_overwrite=True или CLI-флаг --allow-frozen-overwrite."
         )
+
+    if not reports_root_norm.is_relative_to(root_norm):
+        raise ValueError(f"Reports root escapes base directory: {reports_root}")
+    if not rep_dir_norm.is_relative_to(reports_root_norm):
+        raise ValueError(f"Reports directory escapes reports root: {rep_dir}")
 
     if not rep_dir.exists():
         raise FileNotFoundError(f"Reports directory not found: {rep_dir}")
@@ -1049,7 +1166,9 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    root_dir = Path(__file__).resolve().parent.parent
+    env_root = os.environ.get("INFO_SEARCHER_ROOT", "").strip()
+    root_dir = Path(env_root).resolve() if env_root else PROJECT_ROOT.resolve()
+    is_repo_root = _norm_resolved_path(root_dir) == _norm_resolved_path(PROJECT_ROOT)
     configs_dir = root_dir / "configs"
     slugs = (
         [p.stem for p in sorted(configs_dir.glob("*.yaml"))]
@@ -1058,7 +1177,12 @@ if __name__ == "__main__":
     )
 
     for slug in slugs:
-        if args.nosology == "all" and slug in FROZEN_V1_NOSOLOGIES and not args.allow_frozen_overwrite:
+        if (
+            args.nosology == "all"
+            and is_repo_root
+            and slug.lower() in FROZEN_V1_NOSOLOGIES
+            and not args.allow_frozen_overwrite
+        ):
             print(
                 f"[DOCX Exporter: {slug}] Skipped frozen v1.x nosology "
                 "(pass --allow-frozen-overwrite to overwrite)."

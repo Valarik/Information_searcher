@@ -33,6 +33,7 @@ import csv
 import hashlib
 import io
 import json
+import os
 import subprocess
 import sys
 import xml.etree.ElementTree as ET
@@ -40,6 +41,7 @@ import zipfile
 from pathlib import Path
 from typing import Any
 
+import pandas as pd
 import pytest
 import streamlit as st
 import yaml
@@ -1449,7 +1451,7 @@ def test_v1_frozen_regression_and_zero_mutation(monkeypatch: pytest.MonkeyPatch)
         f"SQLite WAL/SHM sidecar set changed: before={before_sidecars}, after={after_sidecars}"
     )
 
-    # 4) Git working-tree immutability gate across all 6 frozen v1.x directories
+    # 4) Git working-tree immutability gate across all 6 frozen v1.x directories + 3 frozen configs (IN-05)
     git_res = subprocess.run(
         [
             "git",
@@ -1461,6 +1463,9 @@ def test_v1_frozen_regression_and_zero_mutation(monkeypatch: pytest.MonkeyPatch)
             "reports/prom",
             "reports/metroplasty_pregnancy",
             "reports/trigger_finger",
+            "configs/prom.yaml",
+            "configs/metroplasty_pregnancy.yaml",
+            "configs/trigger_finger.yaml",
         ],
         cwd=PROJECT_ROOT,
         check=True,
@@ -1468,3 +1473,761 @@ def test_v1_frozen_regression_and_zero_mutation(monkeypatch: pytest.MonkeyPatch)
         text=True,
     )
     assert git_res.stdout.strip() == "", f"Frozen v1.x git tree dirty:\n{git_res.stdout}"
+
+
+# ===========================================================================
+# 6. Phase 19 Code Review Regression Tests (CR-01..04, WR-01..07, IN-01..06)
+# ===========================================================================
+
+
+def _extract_docx_xml_and_rels(docx_source: Path | bytes) -> tuple[ET.Element, ET.Element]:
+    """Return parsed (word/document.xml root, word/_rels/document.xml.rels root)."""
+    if isinstance(docx_source, Path):
+        zf_ctx = zipfile.ZipFile(docx_source, "r")
+    else:
+        zf_ctx = zipfile.ZipFile(io.BytesIO(docx_source), "r")
+    with zf_ctx as zf:
+        doc_root = ET.fromstring(zf.read("word/document.xml"))
+        rels_root = ET.fromstring(zf.read("word/_rels/document.xml.rels"))
+    return doc_root, rels_root
+
+
+def _create_dir_link_or_junction(link_path: Path, target_path: Path) -> None:
+    """Create a directory symlink or Windows NTFS junction (works without admin rights)."""
+    try:
+        os.symlink(target_path, link_path, target_is_directory=True)
+    except OSError:
+        if sys.platform != "win32":
+            raise
+        subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(link_path), str(target_path)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+
+def _remove_dir_link_safely(link_path: Path) -> None:
+    """Remove a directory symlink/junction without touching the target directory."""
+    if not link_path.exists() and not link_path.is_symlink():
+        return
+    try:
+        os.rmdir(link_path)
+    except OSError:
+        link_path.unlink(missing_ok=True)
+
+
+def test_docx_review_regressions_security_severity_and_escaping(tmp_path: Path) -> None:
+    """Lock CR-03 (link injection), WR-01 (NaN/non-list), WR-02 (severity classifier), WR-03 (backslash-pipe), WR-07."""
+    ws = _build_synthetic_v2_workspace(tmp_path)
+    exec_md = ws["exec_path"].read_text(encoding="utf-8")
+
+    # --- WR-07 & WR-02: Grade IV directly in frequent_complications + precision/recall ---
+    kb_sev = copy.deepcopy(ws["kb_index"])
+    kb_sev["frequent_complications"].extend(
+        [
+            {
+                "modality": "Открытый релиз связки A1",
+                "complication_name": "Тяжёлый ишемический некроз (частая IV)",
+                "event_class": "true_complication",
+                "clavien_dindo_grade": "IV",
+                "reversibility": "requires_reoperation",
+                "frequency_pct": "1.2%",
+                "frequency_median_num": 1.2,
+                "sample_size_total": 180,
+                "time_window": "7 суток",
+                "anatomical_substrate": "Сосудистая арка пальца",
+                "prevention_and_management": "Экстренная реваскуляризация",
+                "evidence_pmids": ["88000001"],
+            },
+            {
+                "modality": "УЗ-контролируемый чрескожный релиз",
+                "complication_name": "Целлюлит с в/в антибиотиками",
+                "event_class": "true_complication",
+                "clavien_dindo_grade": "II (IV antibiotics)",
+                "reversibility": "requires_conservative_therapy",
+                "frequency_pct": "2.1%",
+                "frequency_median_num": 2.1,
+                "sample_size_total": 200,
+                "time_window": "10 суток",
+                "anatomical_substrate": "Подкожная клетчатка",
+                "prevention_and_management": "Внутривенный цефазолин",
+                "evidence_pmids": ["88000002"],
+            },
+            {
+                "modality": "Открытый релиз связки A1",
+                "complication_name": "Ревизия с пунктуацией IIIb",
+                "event_class": "true_complication",
+                "clavien_dindo_grade": "IIIb.",
+                "reversibility": "requires_reoperation",
+                "frequency_pct": "1.5%",
+                "frequency_median_num": 1.5,
+                "sample_size_total": 160,
+                "time_window": "30 суток",
+                "anatomical_substrate": "Сухожильное влагалище",
+                "prevention_and_management": "Тенолиз",
+                "evidence_pmids": ["88000003"],
+            },
+            {
+                "modality": "Открытый релиз связки A1",
+                "complication_name": "Осложнение верхний регистр IIIB",
+                "event_class": "true_complication",
+                "clavien_dindo_grade": "IIIB",
+                "reversibility": "requires_reoperation",
+                "frequency_pct": "1.4%",
+                "frequency_median_num": 1.4,
+                "sample_size_total": 160,
+                "time_window": "30 суток",
+                "anatomical_substrate": "Капсула сустава",
+                "prevention_and_management": "Ревизия",
+                "evidence_pmids": ["88000003"],
+            },
+            {
+                "modality": "Открытый релиз связки A1",
+                "complication_name": "Осложнение с диапазоном IIIa–IV",
+                "event_class": "true_complication",
+                "clavien_dindo_grade": "Clavien–Dindo IIIa–IV",
+                "reversibility": "requires_reoperation",
+                "frequency_pct": "1.1%",
+                "frequency_median_num": 1.1,
+                "sample_size_total": 140,
+                "time_window": "14 суток",
+                "anatomical_substrate": "Сосудисто-нервный пучок",
+                "prevention_and_management": "ОРИТ и ревизия",
+                "evidence_pmids": ["88000004"],
+            },
+            {
+                "modality": "Открытый релиз связки A1",
+                "complication_name": "Критическая органная дисфункция с двоеточием",
+                "event_class": "true_complication",
+                "clavien_dindo_grade": "IV: ICU",
+                "reversibility": "permanent_deficit",
+                "frequency_pct": "1.0%",
+                "frequency_median_num": 1.0,
+                "sample_size_total": 140,
+                "time_window": "48 ч",
+                "anatomical_substrate": "Системная микроциркуляция",
+                "prevention_and_management": "Интенсивная терапия",
+                "evidence_pmids": ["88000004"],
+            },
+        ]
+    )
+    sev_root, _ = _extract_docx_xml_root(docx_exporter.build_executive_docx_bytes(exec_md, kb_sev))
+    _assert_openxml_table_invariants(sev_root, min_tables=6)
+
+    def _row_fills_by_needle(root_el: ET.Element, needle: str) -> set[str]:
+        matched = [
+            tr
+            for tbl in root_el.findall(f".//{W}tbl")
+            for tr in tbl.findall(f"{W}tr")[1:]
+            if needle in _element_plain_text(tr)
+        ]
+        assert len(matched) == 1, f"Expected 1 row matching {needle!r}, got {len(matched)}"
+        return {shd.attrib.get(f"{W}fill", "") for shd in matched[0].findall(f".//{W}shd")}
+
+    alert_fills = {"FEE2E2", "FECACA", "FFEDD5", "FED7AA"}
+    # Grade IV inside frequent_complications (NOT red flags table) MUST get red shading
+    assert {"FEE2E2", "FECACA"}.issubset(_row_fills_by_needle(sev_root, "Тяжёлый ишемический некроз (частая IV)"))
+    assert {"FEE2E2", "FECACA"}.issubset(_row_fills_by_needle(sev_root, "Осложнение с диапазоном IIIa–IV"))
+    assert {"FEE2E2", "FECACA"}.issubset(_row_fills_by_needle(sev_root, "Критическая органная дисфункция с двоеточием"))
+    # IIIb. and IIIB MUST get amber shading
+    assert {"FFEDD5", "FED7AA"}.issubset(_row_fills_by_needle(sev_root, "Ревизия с пунктуацией IIIb"))
+    assert {"FFEDD5", "FED7AA"}.issubset(_row_fills_by_needle(sev_root, "Осложнение верхний регистр IIIB"))
+    # II (IV antibiotics) MUST NOT trigger red or amber shading!
+    assert _row_fills_by_needle(sev_root, "Целлюлит с в/в антибиотиками").isdisjoint(alert_fills)
+
+    # Broad chapter heading '## 4. Частые и критические осложнения лечения' MUST NOT paint Grade I/II rows red
+    # Inline Russian 'Клавьен–Диндо IV', 'Clavien–Dindo класс IV', 'Clavien–Dindo IIIa–IV' MUST paint red
+    md_inline = (
+        "## 4. Частые и критические осложнения лечения\n\n"
+        "| Событие | Описание |\n"
+        "| :--- | :--- |\n"
+        "| Лёгкий отёк | Осложнение Clavien–Dindo II (IV antibiotics) без ревизии |\n"
+        "| Сепсис | Осложнение Клавьен–Диндо IV с переводом в ОРИТ |\n"
+        "| Тромбоз | Осложнение Clavien–Dindo класс IV с экстренной ревизией |\n"
+        "| Диапазон | Осложнение Clavien–Dindo IIIa–IV при повторной операции |\n"
+        "| Свищ | Осложнение Clavien–Dindo IIIb. потребовавшее ревизии |\n"
+    )
+    inline_root, _ = _extract_docx_xml_root(docx_exporter.build_docx_bytes_from_markdown(md_inline))
+    assert _row_fills_by_needle(inline_root, "Лёгкий отёк").isdisjoint(alert_fills)
+    assert "FEE2E2" in _row_fills_by_needle(inline_root, "Сепсис")
+    assert "FEE2E2" in _row_fills_by_needle(inline_root, "Тромбоз")
+    assert "FEE2E2" in _row_fills_by_needle(inline_root, "Диапазон")
+    assert "FFEDD5" in _row_fills_by_needle(inline_root, "Свищ")
+
+    # --- CR-03: Markdown hyperlink injection neutralization (including nested bypass attempt) ---
+    evil_link = "Pain [Click](https://evil.example/phish)"
+    nested_evil_link = "Nested [[Click](https://evil.example/phish)](https://evil.example/phish)"
+    kb_inj = copy.deepcopy(ws["kb_index"])
+    kb_inj["frequent_complications"][0]["complication_name"] = evil_link
+    kb_inj["frequent_complications"][0]["prevention_and_management"] = nested_evil_link
+    kb_inj["clinical_decision_nuances"]["universal_workhorse_modalities"][0]["practical_nuances"] = evil_link
+
+    inj_bytes = docx_exporter.build_executive_docx_bytes(exec_md, kb_inj)
+    inj_doc, inj_rels = _extract_docx_xml_and_rels(inj_bytes)
+    rel_targets = [el.attrib.get("Target", "") for el in inj_rels]
+    assert not any("evil.example" in t for t in rel_targets), f"Injected external rel found: {rel_targets}"
+    assert "https://pubmed.ncbi.nlm.nih.gov/88000001/" in rel_targets
+
+    r_ns = docx_exporter.R_NS
+    rel_by_id = {el.attrib.get("Id", ""): el.attrib.get("Target", "") for el in inj_rels}
+    hyperlinks = inj_doc.findall(f".//{W}hyperlink")
+    assert len(hyperlinks) >= 1
+    for hl in hyperlinks:
+        rid = hl.attrib.get(f"{{{r_ns}}}id", "")
+        target = rel_by_id.get(rid, "")
+        assert target.startswith("https://pubmed.ncbi.nlm.nih.gov/"), f"Unexpected hyperlink target: {target!r}"
+        assert "Click" not in _element_plain_text(hl)
+
+    plain_inj = _element_plain_text(inj_doc)
+    assert evil_link in plain_inj, "Visible text lost or mangled with stray backslashes"
+    assert nested_evil_link in plain_inj
+
+    # --- WR-01: NaN / inf & non-list truthy kb_index resilience ---
+    assert docx_exporter.is_v2_kb_index({"frequent_complications": "corrupt"}) is False
+    assert docx_exporter.is_v2_kb_index({"frequent_complications": 123}) is False
+    assert docx_exporter.is_v2_kb_index({"rare_critical_red_flags": {"bad": True}}) is False
+    assert (
+        docx_exporter.is_v2_kb_index(
+            {"clinical_decision_nuances": {"universal_workhorse_modalities": "not-a-list"}}
+        )
+        is False
+    )
+    kb_nan = {
+        "schema_version": "2.0",
+        "frequent_complications": [
+            {
+                "modality": "Method A",
+                "complication_name": "NaN numeric test",
+                "event_class": "true_complication",
+                "clavien_dindo_grade": "II",
+                "reversibility": "requires_conservative_therapy",
+                "frequency_pct": "",
+                "frequency_median_num": float("nan"),
+                "sample_size_total": float("nan"),
+                "time_window": "7 days",
+                "anatomical_substrate": None,
+                "prevention_and_management": float("inf"),
+                "evidence_pmids": ["88000001"],
+            },
+            {
+                "modality": "Method B",
+                "complication_name": "Inf numeric test",
+                "event_class": "true_complication",
+                "clavien_dindo_grade": "I",
+                "reversibility": "transient_self_limiting",
+                "frequency_pct": "3%",
+                "frequency_median_num": float("inf"),
+                "sample_size_total": float("-inf"),
+                "time_window": "",
+                "anatomical_substrate": "Skin",
+                "prevention_and_management": "Rest",
+                "evidence_pmids": ["88000001"],
+            },
+        ],
+        "rare_critical_red_flags": 123,
+        "clinical_decision_nuances": {
+            "universal_workhorse_modalities": "corrupt",
+            "overlapping_indications_and_gray_zones": [
+                {
+                    "clinical_scenario": "Overlap",
+                    "competing_modalities": [None, "Method A", float("nan")],
+                    "why_no_single_winner": "Equal",
+                    "decisive_practical_factors": "Equipment",
+                    "evidence_pmids": ["88000001"],
+                }
+            ],
+            "strict_niche_or_salvage_indications": 999,
+        },
+    }
+    nan_bytes = docx_exporter.build_executive_docx_bytes("# Exec\n\nBody text.", kb_nan)
+    nan_root, _ = _extract_docx_xml_root(nan_bytes)
+    nan_text = _element_plain_text(nan_root).lower()
+    assert "nan%" not in nan_text
+    assert "inf%" not in nan_text
+    assert "none" not in nan_text
+
+    # --- WR-03: _split_table_row() backslash-adjacent-to-pipe parsing ---
+    assert docx_exporter._split_table_row(r"|foo\\|bar|") == ["foo\\", "bar"]
+    assert docx_exporter._split_table_row(r"|A|B\\|") == ["A", "B\\"]
+    assert docx_exporter._split_table_row(r"|A|B\|C|") == ["A", "B|C"]
+    esc_a = docx_exporter._escape_md_cell("A\\")
+    esc_b = docx_exporter._escape_md_cell("B\\|C")
+    assert docx_exporter._split_table_row(f"|{esc_a}|{esc_b}|") == ["A\\", "B\\|C"]
+    bs_md = f"| Col1 | Col2 |\n| :--- | :--- |\n| {esc_a} | {esc_b} |\n"
+    bs_root, _ = _extract_docx_xml_root(docx_exporter.build_docx_bytes_from_markdown(bs_md))
+    bs_data_row = bs_root.findall(f".//{W}tbl")[0].findall(f"{W}tr")[1]
+    bs_cells = [_element_plain_text(tc) for tc in bs_data_row.findall(f"{W}tc")]
+    assert bs_cells == ["A\\", "B\\|C"]
+
+
+def test_security_and_data_layer_review_regressions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Lock CR-02 (symlink/junction frozen guard), CR-04 (KB set equality), WR-04 (monkeypatch priority), IN-01/02/04/06."""
+    # --- CR-02: Symlink/junction bypass & case-variant frozen v1.x protection ---
+    link_base = tmp_path / "symlink_attack_docx"
+    link_base.mkdir()
+    reports_link = link_base / "reports"
+    _create_dir_link_or_junction(reports_link, PROJECT_ROOT / "reports")
+    try:
+        with pytest.raises(PermissionError):
+            docx_exporter.export_nosology_docx_files("prom", base_dir=link_base)
+        with pytest.raises(PermissionError):
+            docx_exporter.export_nosology_docx_files("PROM", base_dir=link_base)
+        with pytest.raises(ValueError):
+            docx_exporter.export_nosology_docx_files("non_frozen_escape", base_dir=link_base)
+    finally:
+        _remove_dir_link_safely(reports_link)
+
+    cfg_link_base = tmp_path / "symlink_attack_cfg"
+    cfg_link_base.mkdir()
+    configs_link = cfg_link_base / "configs"
+    _create_dir_link_or_junction(configs_link, PROJECT_ROOT / "configs")
+    try:
+        monkeypatch.setenv("INFO_SEARCHER_ROOT", str(cfg_link_base))
+        with pytest.raises(PermissionError):
+            universal_schema.save_new_nosology_config({"nosology": {"id": "prom"}})
+        with pytest.raises(ValueError):
+            universal_schema.save_new_nosology_config({"nosology": {"id": "non_frozen_escape"}})
+    finally:
+        monkeypatch.delenv("INFO_SEARCHER_ROOT", raising=False)
+        _remove_dir_link_safely(configs_link)
+
+    # --- CR-04: verify_all_reports() rejects orphaned/missing, duplicate, and path-traversal KB modules ---
+    # (a) Orphaned .md paired with missing declared .md (equal count 6 == 6!)
+    ws_orphan = _build_synthetic_v2_workspace(tmp_path / "cr04_orphan", nosology_id="cr04_orphan")
+    (ws_orphan["kb_dir"] / "06_complications_and_safety.md").unlink()
+    (ws_orphan["kb_dir"] / "99_orphan_unindexed.md").write_text(
+        "# Orphan\n\n" + ("Контекст [PMID: 88000001]. " * 200),
+        encoding="utf-8",
+    )
+    with pytest.raises(AssertionError):
+        verify_reports.verify_all_reports(
+            "cr04_orphan", schema_version="v2", write_outputs=False, base_dir=tmp_path / "cr04_orphan"
+        )
+
+    # (b) Duplicate module entry in kb_index.json
+    ws_dup = _build_synthetic_v2_workspace(tmp_path / "cr04_dup", nosology_id="cr04_dup")
+    kb_dup = json.loads(ws_dup["kb_json_path"].read_text(encoding="utf-8"))
+    kb_dup["modules"][-1]["file"] = kb_dup["modules"][0]["file"]
+    ws_dup["kb_json_path"].write_text(json.dumps(kb_dup, ensure_ascii=False, indent=2), encoding="utf-8")
+    with pytest.raises(AssertionError, match="Duplicate KB module file"):
+        verify_reports.verify_all_reports(
+            "cr04_dup", schema_version="v2", write_outputs=False, base_dir=tmp_path / "cr04_dup"
+        )
+
+    # (c) Path traversal entry in kb_index.json["modules"]
+    ws_trav = _build_synthetic_v2_workspace(tmp_path / "cr04_trav", nosology_id="cr04_trav")
+    kb_trav = json.loads(ws_trav["kb_json_path"].read_text(encoding="utf-8"))
+    kb_trav["modules"][-1]["file"] = "../../README.md"
+    ws_trav["kb_json_path"].write_text(json.dumps(kb_trav, ensure_ascii=False, indent=2), encoding="utf-8")
+    with pytest.raises(ValueError):
+        verify_reports.verify_all_reports(
+            "cr04_trav", schema_version="v2", write_outputs=False, base_dir=tmp_path / "cr04_trav"
+        )
+
+    # --- WR-04: Explicit monkeypatch on CONFIGS_DIR/DATA_DIR/REPORTS_DIR wins over INFO_SEARCHER_ROOT ---
+    env_root = tmp_path / "wr04_env_root"
+    patched_cfg = tmp_path / "wr04_patched_configs"
+    patched_data = tmp_path / "wr04_patched_data"
+    patched_rep = tmp_path / "wr04_patched_reports"
+    monkeypatch.setenv("INFO_SEARCHER_ROOT", str(env_root))
+    monkeypatch.setattr(universal_schema, "CONFIGS_DIR", patched_cfg)
+    monkeypatch.setattr(universal_schema, "DATA_DIR", patched_data)
+    monkeypatch.setattr(universal_schema, "REPORTS_DIR", patched_rep)
+    assert universal_schema._get_configs_dir() == patched_cfg
+    assert universal_schema._get_data_dir() == patched_data
+    assert universal_schema._get_reports_dir() == patched_rep
+    saved_wr04 = universal_schema.save_new_nosology_config({"nosology": {"id": "wr04_priority_test"}})
+    assert saved_wr04.parent == patched_cfg.resolve()
+    assert not (env_root / "configs" / "wr04_priority_test.yaml").exists()
+
+    # --- IN-01: Legacy openalex / clinicaltrials stripped; whitespace-only dropped ---
+    saved_ws_blank = universal_schema.save_new_nosology_config(
+        {
+            "nosology": {"id": "in01_blank"},
+            "queries": {"pubmed": "q", "openalex": "   ", "clinicaltrials": "\t \n"},
+        }
+    )
+    cfg_blank = yaml.safe_load(saved_ws_blank.read_text(encoding="utf-8"))
+    assert "openalex" not in cfg_blank["queries"]
+    assert "openalex_search" not in cfg_blank["queries"]
+    assert "clinicaltrials" not in cfg_blank["queries"]
+    assert "clinical_trials_condition" not in cfg_blank["queries"]
+
+    saved_ws_strip = universal_schema.save_new_nosology_config(
+        {
+            "nosology": {"id": "in01_strip"},
+            "queries": {"pubmed": "q", "openalex": "  Trigger Finger  ", "clinicaltrials": "  Hand  "},
+        }
+    )
+    cfg_strip = yaml.safe_load(saved_ws_strip.read_text(encoding="utf-8"))
+    assert cfg_strip["queries"]["openalex_search"] == "Trigger Finger"
+    assert cfg_strip["queries"]["clinical_trials_condition"] == "Hand"
+
+    # Undo monkeypatches before CLI / remaining checks
+    monkeypatch.undo()
+
+    # --- IN-02: docx_exporter CLI --nosology all honors INFO_SEARCHER_ROOT ---
+    cli_root = tmp_path / "in02_cli_root"
+    cli_ws = _build_synthetic_v2_workspace(cli_root, nosology_id="in02_cli_nos")
+    cli_env = os.environ.copy()
+    cli_env["INFO_SEARCHER_ROOT"] = str(cli_root)
+    cli_res = subprocess.run(
+        [sys.executable, str(PROJECT_ROOT / "src" / "docx_exporter.py"), "--nosology", "all"],
+        env=cli_env,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=True,
+    )
+    assert "in02_cli_nos" in cli_res.stdout
+    assert (cli_ws["rep_dir"] / "executive_summary.docx").exists()
+
+    # --- IN-04: query_complications_df() PMID regex validation & DOI prefix normalization ---
+    in04_db = tmp_path / "in04_urls.db"
+    conn = schema.init_db(in04_db)
+    try:
+        for row_vals in (
+            ("88000001", "https://doi.org/10.1000/already", "ModA", "Comp1"),
+            ("TBD", "doi: 10.1000/prefixed", "ModA", "Comp2"),
+            ("0", "http://dx.doi.org/10.1000/dx", "ModA", "Comp3"),
+        ):
+            conn.execute(
+                """
+                INSERT INTO extracted_complications (
+                    pmid, doi, evidence_tier, modality, complication_name,
+                    event_class, clavien_dindo_grade, frequency_num, reversibility,
+                    sample_size, is_rare_casuistry
+                ) VALUES (?, ?, 2, ?, ?, 'true_complication', 'II', 5.0, 'requires_conservative_therapy', 50, 0)
+                """,
+                row_vals,
+            )
+        conn.commit()
+    finally:
+        conn.close()
+    df_urls = universal_schema.query_complications_df(in04_db)
+    url_by_comp = {
+        r["complication_name"]: (r["pubmed_url"], r["doi_url"])
+        for _, r in df_urls.iterrows()
+    }
+    assert url_by_comp["Comp1"] == ("https://pubmed.ncbi.nlm.nih.gov/88000001/", "https://doi.org/10.1000/already")
+    assert url_by_comp["Comp2"] == ("", "https://doi.org/10.1000/prefixed")
+    assert url_by_comp["Comp3"] == ("", "https://doi.org/10.1000/dx")
+
+    # --- IN-06: CSV export neutralizes leading =/@/\t/\r while preserving clinical +/- ---
+    df_csv = pd.DataFrame(
+        {
+            "val": [
+                "=CMD|' /C calc'!A0",
+                "@SUM(1+1)",
+                "\t=1+1",
+                "\r=2+2",
+                "+12%",
+                "-5°",
+                "normal text",
+            ]
+        }
+    )
+    csv_raw = universal_schema.dataframe_to_csv_bytes(df_csv)
+    assert csv_raw.startswith(b"\xef\xbb\xbf")
+    csv_vals = [r["val"] for r in csv.DictReader(io.StringIO(csv_raw.decode("utf-8-sig")))]
+    assert csv_vals == [
+        "'=CMD|' /C calc'!A0",
+        "'@SUM(1+1)",
+        "'\t=1+1",
+        "'\r=2+2",
+        "+12%",
+        "-5°",
+        "normal text",
+    ]
+
+
+def _build_second_v2_workspace(base_dir: Path, nosology_id: str = "beta_knee_v2") -> dict[str, Any]:
+    """Create a second v2.0 nosology with completely disjoint modalities/grades and JSON null edge cases."""
+    ws = _build_synthetic_v2_workspace(base_dir, nosology_id=nosology_id)
+
+    # Replace config name_ru so sidebar label is distinct
+    cfg = yaml.safe_load(ws["cfg_path"].read_text(encoding="utf-8"))
+    cfg["nosology"]["name_ru"] = "Синтетическое повреждение мениска коленного сустава (v2.0)"
+    cfg["nosology"]["name_en"] = "Synthetic Meniscal Tear"
+    cfg["nosology"]["icd10"] = "M23.2"
+    ws["cfg_path"].write_text(yaml.safe_dump(cfg, allow_unicode=True, sort_keys=False), encoding="utf-8")
+
+    # Replace SQLite extracted_complications with 3 completely disjoint non-casuistry rows + 1 casuistry row
+    conn = schema.init_db(ws["db_path"])
+    try:
+        conn.execute("DELETE FROM extracted_complications")
+        art_ids = [r[0] for r in conn.execute("SELECT id FROM articles ORDER BY id ASC LIMIT 5").fetchall()]
+        beta_rows = [
+            {
+                "article_id": art_ids[0],
+                "pmid": "88000001",
+                "doi": "10.1000/beta.1",
+                "first_author_year": "KneeAuth1 2024",
+                "evidence_tier": 2,
+                "modality": "Артроскопический шов мениска",
+                "complication_name": "Артрофиброз коленного сустава",
+                "event_class": "true_complication",
+                "timing_category": "late_postop",
+                "clavien_dindo_grade": "IIIa",
+                "frequency_pct": "4.8% (12/250)",
+                "frequency_num": 4.8,
+                "reversibility": "requires_reoperation",
+                "time_window": "3–6 месяцев",
+                "anatomical_substrate": "Капсула и передний интервал сустава",
+                "prevention_and_management": "Ранняя мобилизация; редрессация под наркозом",
+                "sample_size": 250,
+                "is_rare_casuistry": 0,
+            },
+            {
+                "article_id": art_ids[1],
+                "pmid": "88000002",
+                "doi": "10.1000/beta.2",
+                "first_author_year": "KneeAuth2 2024",
+                "evidence_tier": 2,
+                "modality": "Парциальная менискэктомия",
+                "complication_name": "Гемартроз послеоперационный",
+                "event_class": "true_complication",
+                "timing_category": "early_postop",
+                "clavien_dindo_grade": "II",
+                "frequency_pct": "6.1% (18/295)",
+                "frequency_num": 6.1,
+                "reversibility": "requires_conservative_therapy",
+                "time_window": "7–14 суток",
+                "anatomical_substrate": "Синовиальная оболочка",
+                "prevention_and_management": "Холодовая компрессия, пункция при напряжённом выпоте",
+                "sample_size": 295,
+                "is_rare_casuistry": 0,
+            },
+            {
+                "article_id": art_ids[2],
+                "pmid": "88000003",
+                "doi": "10.1000/beta.3",
+                "first_author_year": "KneeAuth3 2025",
+                "evidence_tier": 2,
+                "modality": "Артроскопический шов мениска",
+                "complication_name": "Септический артрит коленного сустава",
+                "event_class": "true_complication",
+                "timing_category": "early_postop",
+                "clavien_dindo_grade": "IV",
+                "frequency_pct": "1.2% (3/250)",
+                "frequency_num": 1.2,
+                "reversibility": "requires_reoperation",
+                "time_window": "5–21 сутки",
+                "anatomical_substrate": "Полость коленного сустава",
+                "prevention_and_management": "Экстренный артроскопический лаваж и в/в антибиотики",
+                "sample_size": 250,
+                "is_rare_casuistry": 0,
+            },
+            {
+                "article_id": art_ids[4],
+                "pmid": "88000005",
+                "doi": "10.1000/beta.5",
+                "first_author_year": "KneeAuth5 2025",
+                "evidence_tier": 4,
+                "modality": "Трансплантация алломениска",
+                "complication_name": "Травма подколенной артерии (казуистика Tier 4)",
+                "event_class": "true_complication",
+                "timing_category": "intraop",
+                "clavien_dindo_grade": "IV",
+                "frequency_pct": "1/1",
+                "frequency_num": 100.0,
+                "reversibility": "permanent_deficit",
+                "time_window": "экстренно",
+                "anatomical_substrate": "Подколенная артерия",
+                "prevention_and_management": "Защитный ретрактор и сосудистая бригада",
+                "sample_size": 1,
+                "is_rare_casuistry": 1,
+            },
+        ]
+        for row_payload in beta_rows:
+            assert extractor_common.insert_extracted_complication(conn, row_payload) is not None
+        conn.commit()
+    finally:
+        conn.close()
+
+    # Update kb_index.json with disjoint modalities/grades + explicit JSON null values (WR-06)
+    kb = json.loads(ws["kb_json_path"].read_text(encoding="utf-8"))
+    kb["nosology_meta"]["title_ru"] = cfg["nosology"]["name_ru"]
+    kb["nosology_meta"]["title_en"] = cfg["nosology"]["name_en"]
+    kb["nosology_meta"]["icd10"] = "M23.2"
+    kb["modalities"][0]["name"] = "Артроскопический шов мениска"
+    kb["modalities"][1]["name"] = "Парциальная менискэктомия"
+    kb["modalities"][2]["name"] = "Трансплантация алломениска"
+    kb["frequent_complications"] = [
+        {
+            "modality": "Артроскопический шов мениска",
+            "complication_name": "Артрофиброз коленного сустава",
+            "event_class": "true_complication",
+            "clavien_dindo_grade": "IIIa",
+            "reversibility": "requires_reoperation",
+            "frequency_pct": "4.8%",
+            "frequency_median_num": 4.8,
+            "sample_size_total": 250,
+            "time_window": "3–6 месяцев",
+            "anatomical_substrate": "Капсула сустава",
+            "prevention_and_management": "Ранняя мобилизация",
+            "evidence_pmids": ["88000001"],
+        },
+        {
+            "modality": "Парциальная менискэктомия",
+            "complication_name": "Событие с отсутствующей степенью и null-полями",
+            "event_class": "true_complication",
+            "clavien_dindo_grade": None,
+            "reversibility": None,
+            "frequency_pct": "6.1%",
+            "frequency_median_num": 6.1,
+            "sample_size_total": 295,
+            "time_window": None,
+            "anatomical_substrate": None,
+            "prevention_and_management": None,
+            "evidence_pmids": ["88000002"],
+        },
+    ]
+    kb["rare_critical_red_flags"] = [
+        {
+            "modality": "Трансплантация алломениска",
+            "complication_name": "Травма подколенной артерии",
+            "clavien_dindo_grade": "IV",
+            "reversibility": "permanent_deficit",
+            "frequency_pct": "< 0.2%",
+            "frequency_max_num": 0.2,
+            "anatomical_substrate": None,
+            "prevention_and_management": None,
+            "evidence_pmids": ["88000005"],
+        }
+    ]
+    kb["clinical_decision_nuances"]["universal_workhorse_modalities"][0]["modality"] = "Артроскопический шов мениска"
+    kb["clinical_decision_nuances"]["universal_workhorse_modalities"][0]["practical_nuances"] = None
+    kb["clinical_decision_nuances"]["overlapping_indications_and_gray_zones"][0]["competing_modalities"] = [
+        None,
+        "Артроскопический шов мениска",
+        "Парциальная менискэктомия",
+    ]
+    ws["kb_json_path"].write_text(json.dumps(kb, ensure_ascii=False, indent=2), encoding="utf-8")
+    return ws
+
+
+def test_v2_apptest_multi_nosology_switch_overrides_and_resilience(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Lock CR-01 (multi-nosology v2->v2 switch), WR-05 (subprocess errors), WR-06 (JSON null / missing CD), WR-07 (Tab 4 overrides & negative paths)."""
+    _build_synthetic_v2_workspace(tmp_path, nosology_id="alpha_hand_v2")
+    _build_second_v2_workspace(tmp_path, nosology_id="beta_knee_v2")
+
+    monkeypatch.setenv("INFO_SEARCHER_ROOT", str(tmp_path))
+    monkeypatch.setenv("INFO_SEARCHER_APPTEST_ACTIVE", "1")
+    st.cache_data.clear()
+
+    try:
+        at = AppTest.from_file(str(PROJECT_ROOT / "app.py"), default_timeout=60).run(timeout=60)
+        assert len(at.exception) == 0, f"Initial multi-v2 AppTest raised: {at.exception}"
+
+        # Confirm starting on alpha_hand_v2
+        assert at.selectbox(key="sidebar_nosology_select").value == "alpha_hand_v2"
+        t25_alpha = next(t for t in at.tabs if "2.5" in t.label)
+        assert len(t25_alpha.get("plotly_chart")) >= 2
+        assert len(t25_alpha.dataframe) >= 1
+
+        # Visit Tab 3 Option 5 on alpha_hand_v2 so its multiselect session_state keys are populated
+        t3_opts_alpha = list(at.radio(key="tab3_table_choice").options)
+        opt5_alpha = next(o for o in t3_opts_alpha if o.startswith("5."))
+        at.radio(key="tab3_table_choice").set_value(opt5_alpha).run(timeout=60)
+        assert len(at.exception) == 0
+        t3_alpha = next(t for t in at.tabs if t.label.startswith("📚 3."))
+        assert len(t3_alpha.dataframe[0].value) == 4
+
+        # --- CR-01: Switch sidebar_nosology_select alpha_hand_v2 -> beta_knee_v2 ---
+        at.selectbox(key="sidebar_nosology_select").set_value("beta_knee_v2").run(timeout=60)
+        assert len(at.exception) == 0, f"Switching to beta_knee_v2 raised: {at.exception}"
+
+        # Subtab 2.5 MUST immediately populate both charts & rows for beta_knee_v2 (0 stale filter lockout)
+        t25_beta = next(t for t in at.tabs if "2.5" in t.label)
+        assert len(t25_beta.get("plotly_chart")) >= 2, "CR-01 regression: Subtab 2.5 charts wiped out after switch!"
+        assert len(t25_beta.dataframe) >= 1, "CR-01 regression: Subtab 2.5 table missing after switch!"
+        df_25_beta = t25_beta.dataframe[0].value
+        assert len(df_25_beta) == 2
+        assert "Артроскопический шов мениска" in set(df_25_beta["Методика"].tolist())
+        t25_beta_text = _collect_block_text(t25_beta)
+        assert "Нет осложнений, соответствующих выбранным фильтрам" not in t25_beta_text
+
+        # --- WR-06: Missing clavien_dindo_grade renders 'Не указан' (NOT 'I'), and JSON null never renders 'None' ---
+        cd_vals_beta = set(df_25_beta["Clavien–Dindo"].tolist())
+        assert "Не указан" in cd_vals_beta, f"Expected 'Не указан' for missing CD grade, got {cd_vals_beta}"
+        assert "I" not in cd_vals_beta, f"Missing CD grade was fabricated as 'I': {cd_vals_beta}"
+        t26_beta = next(t for t in at.tabs if "2.6" in t.label)
+        t26_beta_text = _collect_block_text(t26_beta)
+        assert "None" not in t25_beta_text, f"Literal 'None' leaked into Subtab 2.5: {t25_beta_text}"
+        assert "None" not in t26_beta_text, f"Literal 'None' leaked into Subtab 2.6: {t26_beta_text}"
+
+        # Subtab 2.4 comparator picks MUST refresh to beta_knee_v2 modalities
+        picked_24 = list(at.multiselect(key="sub4_comparator_picks").value)
+        assert "Артроскопический шов мениска" in picked_24
+
+        # Tab 3 Option 5 on beta_knee_v2 MUST show all 3 non-casuistry rows immediately
+        t3_opts_beta = list(at.radio(key="tab3_table_choice").options)
+        opt5_beta = next(o for o in t3_opts_beta if o.startswith("5."))
+        at.radio(key="tab3_table_choice").set_value(opt5_beta).run(timeout=60)
+        assert len(at.exception) == 0
+        t3_beta = next(t for t in at.tabs if t.label.startswith("📚 3."))
+        assert len(t3_beta.dataframe) >= 1
+        df_35_beta = t3_beta.dataframe[0].value
+        assert len(df_35_beta) == 3, f"CR-01 regression: expected 3 beta rows in Tab 3.5, got {len(df_35_beta)}"
+        assert "Артроскопический шов мениска" in set(df_35_beta["modality"].tolist())
+
+        # --- WR-07: Tab 4 manual complications_queries override persists verbatim to YAML ---
+        override_pm = '("Knee"[MeSH]) AND ("arthrofibrosis"[tiab])'
+        override_epmc = '("knee") AND ("arthrofibrosis")'
+        at.text_input(key="t4_new_id").set_value("knee_override_v2")
+        at.text_area(key="t4_comp_override_pm").set_value(override_pm)
+        at.text_area(key="t4_comp_override_epmc").set_value(override_epmc)
+        at.form_submit_button[0].click().run(timeout=60)
+        assert len(at.exception) == 0
+
+        override_yaml = tmp_path / "configs" / "knee_override_v2.yaml"
+        assert override_yaml.exists()
+        saved_override = yaml.safe_load(override_yaml.read_text(encoding="utf-8"))
+        assert saved_override["complications_queries"]["pubmed"] == override_pm
+        assert saved_override["complications_queries"]["europepmc"] == override_epmc
+
+        # --- WR-07 & IN-03: Tab 4 negative paths (invalid/empty ID + frozen PermissionError) show st.error cleanly ---
+        for bad_id in ("../bad_id", ""):
+            at.text_input(key="t4_new_id").set_value(bad_id)
+            at.form_submit_button[0].click().run(timeout=60)
+            assert len(at.exception) == 0, f"Unhandled exception for bad_id={bad_id!r}: {at.exception}"
+            t4 = next(t for t in at.tabs if t.label.startswith("🛡️ 4."))
+            assert len(t4.error) >= 1, f"Expected st.error for bad_id={bad_id!r}"
+
+        real_save_cfg = universal_schema.save_new_nosology_config
+
+        def _guard_frozen_in_apptest(payload: dict[str, Any], **kwargs: Any) -> Path:
+            nos_id = str((payload.get("nosology") or {}).get("id") or "").strip().lower()
+            if nos_id in universal_schema.FROZEN_V1_NOSOLOGIES:
+                raise PermissionError(f"Замороженная конфигурация v1.x '{nos_id}' защищена от перезаписи.")
+            return real_save_cfg(payload, **kwargs)
+
+        monkeypatch.setattr(universal_schema, "save_new_nosology_config", _guard_frozen_in_apptest)
+        at.text_input(key="t4_new_id").set_value("prom")
+        at.form_submit_button[0].click().run(timeout=60)
+        assert len(at.exception) == 0, f"Frozen ID PermissionError crashed AppTest: {at.exception}"
+        t4 = next(t for t in at.tabs if t.label.startswith("🛡️ 4."))
+        assert any("Защита замороженной нозологии v1.x" in e.value for e in t4.error)
+
+        # --- WR-05: btn_run_verify passes errors='replace' and handles OSError gracefully ---
+        seen_kwargs: list[dict[str, Any]] = []
+
+        def _failing_subprocess_run(*args: Any, **kwargs: Any) -> Any:
+            seen_kwargs.append(dict(kwargs))
+            raise OSError("Simulated spawn failure on Windows")
+
+        monkeypatch.setattr(subprocess, "run", _failing_subprocess_run)
+        at.button(key="btn_run_verify").click().run(timeout=60)
+        assert len(at.exception) == 0, f"btn_run_verify OSError crashed AppTest: {at.exception}"
+        assert len(seen_kwargs) == 1 and seen_kwargs[0].get("errors") == "replace"
+        t4 = next(t for t in at.tabs if t.label.startswith("🛡️ 4."))
+        assert any("Не удалось выполнить аудит" in e.value for e in t4.error)
+    finally:
+        st.cache_data.clear()

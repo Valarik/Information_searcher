@@ -33,7 +33,8 @@ from typing import Any
 
 import yaml
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
+_DEFAULT_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+PROJECT_ROOT = _DEFAULT_PROJECT_ROOT
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
@@ -45,10 +46,12 @@ if hasattr(sys.stdout, "reconfigure"):
 
 
 def get_nosology_paths(nosology_id: str, base_dir: Path | None = None) -> dict[str, Path]:
-    """Resolve and containment-verify config/DB/report paths for a validated nosology_id (T-18-03, T-19-05)."""
+    """Resolve and containment-verify config/DB/report paths for a validated nosology_id (T-18-03, T-19-05, WR-04)."""
     nos_id = validate_nosology_id(nosology_id)
     if base_dir is not None:
         root = Path(base_dir).resolve()
+    elif PROJECT_ROOT != _DEFAULT_PROJECT_ROOT:
+        root = Path(PROJECT_ROOT).resolve()
     else:
         env_root = os.environ.get("INFO_SEARCHER_ROOT", "").strip()
         root = Path(env_root).resolve() if env_root else PROJECT_ROOT.resolve()
@@ -843,15 +846,47 @@ def verify_all_reports(
         f"kb_index.json must index >= 5 modules, got "
         f"{len(kb_index_modules) if isinstance(kb_index_modules, list) else type(kb_index_modules).__name__}"
     )
-    assert len(kb_data.get("modalities", [])) >= 8, "kb_index.json must include >= 8 treatment modalities"
+    modalities_val = kb_data.get("modalities")
+    assert isinstance(modalities_val, list) and len(modalities_val) >= 8, (
+        "kb_index.json must include >= 8 treatment modalities"
+    )
+
+    kb_dir_resolved = kb_dir.resolve()
+    kb_dir_norm = Path(os.path.normcase(str(kb_dir_resolved)))
+    seen_module_paths: set[Path] = set()
+    for idx, mod in enumerate(kb_index_modules):
+        assert isinstance(mod, dict), f"kb_index.json modules[{idx}] must be an object"
+        raw_val = mod.get("file")
+        assert isinstance(raw_val, str) and raw_val.strip(), (
+            f"kb_index.json modules[{idx}] missing non-empty string 'file'"
+        )
+        raw_mod_file = raw_val.strip()
+        rel_candidate = Path(raw_mod_file)
+        if rel_candidate.is_absolute() or ".." in rel_candidate.parts:
+            raise ValueError(f"KB module path must be relative inside knowledge_base dir: {raw_mod_file!r}")
+        if rel_candidate.suffix.lower() != ".md":
+            raise ValueError(f"KB module file must have .md extension: {raw_mod_file!r}")
+        mod_path = (kb_dir_resolved / rel_candidate).resolve()
+        mod_path_norm = Path(os.path.normcase(str(mod_path)))
+        if not mod_path_norm.is_relative_to(kb_dir_norm):
+            raise ValueError(f"KB module path escapes knowledge_base dir: {raw_mod_file!r}")
+        assert mod_path_norm not in seen_module_paths, (
+            f"Duplicate KB module file '{raw_mod_file}' in kb_index.json"
+        )
+        assert mod_path.exists() and mod_path.is_file(), (
+            f"Indexed KB module file not found on disk: {mod_path}"
+        )
+        seen_module_paths.add(mod_path_norm)
 
     kb_md_files = sorted(kb_dir.glob("*.md"))
+    disk_md_set = {Path(os.path.normcase(str(p.resolve()))) for p in kb_md_files}
     assert len(kb_md_files) >= 5, (
         f"Expected >= 5 KB Markdown files for '{nos_id}', found {len(kb_md_files)}"
     )
-    assert len(kb_md_files) == len(kb_index_modules), (
-        f"KB module count mismatch for '{nos_id}': kb_index.json lists {len(kb_index_modules)}, "
-        f"found {len(kb_md_files)} .md files"
+    assert seen_module_paths == disk_md_set, (
+        f"KB module mismatch for '{nos_id}': "
+        f"missing_on_disk={sorted(p.name for p in seen_module_paths - disk_md_set)}, "
+        f"orphaned_on_disk={sorted(p.name for p in disk_md_set - seen_module_paths)}"
     )
     report_files = [
         diss_path,

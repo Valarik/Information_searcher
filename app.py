@@ -20,6 +20,7 @@ Run automated self-test (schema + SQLite + exports + headless Streamlit AppTest)
 
 from __future__ import annotations
 
+import math
 import re
 import subprocess
 import sys
@@ -71,6 +72,7 @@ CLAVIEN_DINDO_COLORS: dict[str, str] = {
     "IIIb": "#f97316",
     "IV": "#ef4444",
     "V": "#7f1d1d",
+    "Не указан": "#94a3b8",
 }
 REVERSIBILITY_LABELS_RU: dict[str, str] = {
     "transient_self_limiting": "Транзиторное (самокупирующееся)",
@@ -85,13 +87,75 @@ REVERSIBILITY_COLORS: dict[str, str] = {
     "permanent_deficit": "#b91c1c",
 }
 REVERSIBILITY_COLORS_RU: dict[str, str] = {
-    REVERSIBILITY_LABELS_RU[k]: v for k, v in REVERSIBILITY_COLORS.items()
+    **{REVERSIBILITY_LABELS_RU[k]: v for k, v in REVERSIBILITY_COLORS.items()},
+    "—": "#94a3b8",
 }
 EVENT_CLASS_LABELS_RU: dict[str, str] = {
     "true_complication": "Истинное осложнение",
     "transient_postop_sequela": "Транзиторное послеоперационное явление",
 }
 _PMID_RE = re.compile(r"^[1-9]\d{0,8}$")
+
+# CR-01: All nosology-scoped filter/selection widget keys cleared whenever active nosology changes
+_NOSOLOGY_SCOPED_WIDGET_KEYS: tuple[str, ...] = (
+    "tab1_search_query",
+    "tab1_diss_sec",
+    "tab1_kb_mod_select",
+    "sub3_group_filter",
+    "sub4_comparator_picks",
+    "sub4_sql_grp",
+    "t25_modalities",
+    "t25_grades",
+    "t25_reversibility",
+    "t25_event_class",
+    "t3_art_tiers",
+    "t3_art_xml",
+    "t3_art_kw",
+    "t3_clin_grp",
+    "t3_clin_kw",
+    "t3_mech_cat",
+    "t3_mech_kw",
+    "t3_tr_status",
+    "t3_tr_kw",
+    "t3_comp_casuistry",
+    "t3_comp_mod",
+    "t3_comp_cd",
+    "t3_comp_rev",
+    "t3_comp_class",
+    "t3_comp_kw",
+)
+
+
+def _dict_list(value: Any) -> list[dict[str, Any]]:
+    """Return list of dict entries only when value is a list (guards against non-list truthy scalars, WR-01)."""
+    return [x for x in value if isinstance(x, dict)] if isinstance(value, list) else []
+
+
+def _clean_str(value: Any, fallback: str = "—") -> str:
+    """Normalize scalar/null/NaN values cleanly without rendering literal 'None' or 'nan' (WR-01, WR-06)."""
+    if value is None or isinstance(value, bool):
+        return fallback
+    if isinstance(value, float) and not math.isfinite(value):
+        return fallback
+    if isinstance(value, str):
+        cleaned = value.strip()
+        return cleaned if cleaned else fallback
+    cleaned = str(value).strip()
+    return cleaned if cleaned else fallback
+
+
+def _safe_int(value: Any, default: int = 0) -> int:
+    """Safely coerce finite numeric value to int without crashing on NaN/inf/None/bool (WR-01)."""
+    if value is None or isinstance(value, bool):
+        return default
+    if isinstance(value, (int, float)):
+        fval = float(value)
+        return int(fval) if math.isfinite(fval) else default
+    try:
+        fval = float(str(value).strip())
+        return int(fval) if math.isfinite(fval) else default
+    except (TypeError, ValueError):
+        return default
 
 
 def _format_pmid_links_md(pmids: Any) -> str:
@@ -169,6 +233,13 @@ def render_sidebar(nosologies: list[dict[str, Any]]) -> tuple[str, dict[str, Any
             key="sidebar_nosology_select",
         )
 
+        # CR-01: Clear nosology-scoped filter/selection widget keys whenever active nosology changes
+        prev_nos_id = st.session_state.get("_active_nosology_id")
+        if prev_nos_id is not None and prev_nos_id != selected_id:
+            for wkey in _NOSOLOGY_SCOPED_WIDGET_KEYS:
+                st.session_state.pop(wkey, None)
+        st.session_state["_active_nosology_id"] = selected_id
+
         bundle = cached_bundle(selected_id, workspace_root=str(get_active_project_root()))
         kb = bundle["kb_index"]
         meta = kb.get("nosology_meta", {})
@@ -194,7 +265,7 @@ def render_sidebar(nosologies: list[dict[str, Any]]) -> tuple[str, dict[str, Any
         c5.metric("Протоколов NCT", f"{stats.get('clinical_trials_nct', 0)}")
         c6.metric("Полнотекстов XML", f"{stats.get('fulltext_xml_count', 233)}")
 
-        comp_rows = int(stats.get("extracted_complications_rows", 0) or 0)
+        comp_rows = _safe_int(stats.get("extracted_complications_rows", 0), default=0)
         if comp_rows > 0 or str(kb.get("schema_version", "")) == "2.0":
             st.metric("Строк осложнений", f"{comp_rows:,}".replace(",", " "))
 
@@ -416,7 +487,7 @@ def render_tab_reports(bundle: dict[str, Any]) -> None:
 
 
 def _render_red_flags_block(red_flags: list[dict[str, Any]]) -> None:
-    """Render rare critical complications (<1%) as native Streamlit warning cards without raw HTML (D-02.4, T-19-02)."""
+    """Render rare critical complications (<1%) as native Streamlit warning cards without raw HTML (D-02.4, T-19-02, WR-06)."""
     if not red_flags:
         return
     st.divider()
@@ -427,27 +498,32 @@ def _render_red_flags_block(red_flags: list[dict[str, Any]]) -> None:
         "или риском стойкого функционального дефицита."
     )
     for rf in red_flags:
-        rev_raw = str(rf.get("reversibility") or "").strip()
+        rev_raw = _clean_str(rf.get("reversibility"), fallback="")
         rev_ru = REVERSIBILITY_LABELS_RU.get(rev_raw, rev_raw or "—")
         pmid_md = _format_pmid_links_md(rf.get("evidence_pmids"))
-        freq_disp = str(rf.get("frequency_pct") or "").strip() or "<1%"
+        freq_disp = _clean_str(rf.get("frequency_pct"), fallback="<1%")
+        comp_disp = _clean_str(rf.get("complication_name"))
+        mod_disp = _clean_str(rf.get("modality"))
+        cd_disp = _clean_str(rf.get("clavien_dindo_grade"), fallback="Не указан")
+        anat_disp = _clean_str(rf.get("anatomical_substrate"))
+        prev_disp = _clean_str(rf.get("prevention_and_management"))
         with st.container(border=True):
             st.markdown(
-                f"**{rf.get('complication_name', '—')}** — _{rf.get('modality', '—')}_ "
-                f"| **Clavien–Dindo:** `{rf.get('clavien_dindo_grade', '—')}` "
+                f"**{comp_disp}** — _{mod_disp}_ "
+                f"| **Clavien–Dindo:** `{cd_disp}` "
                 f"| **Частота:** `{freq_disp}` "
                 f"| **Обратимость:** {rev_ru}"
             )
             c_left, c_right = st.columns(2)
-            c_left.markdown(f"**Анатомический субстрат:** {rf.get('anatomical_substrate', '—')}")
-            c_right.markdown(f"**Профилактика и экстренная тактика:** {rf.get('prevention_and_management', '—')}")
+            c_left.markdown(f"**Анатомический субстрат:** {anat_disp}")
+            c_right.markdown(f"**Профилактика и экстренная тактика:** {prev_disp}")
             st.caption(f"Доказательная база: {pmid_md}")
 
 
 def _render_subtab_complications(kb: dict[str, Any], nos_id: str) -> None:
-    """Subtab 2.5: Frequent complications profile (Clavien-Dindo), Plotly visuals, CSV & Red Flags (D-02, T-19-02)."""
-    freq_list = [x for x in (kb.get("frequent_complications") or []) if isinstance(x, dict)]
-    red_flags = [x for x in (kb.get("rare_critical_red_flags") or []) if isinstance(x, dict)]
+    """Subtab 2.5: Frequent complications profile (Clavien-Dindo), Plotly visuals, CSV & Red Flags (D-02, T-19-02, WR-01, WR-06)."""
+    freq_list = _dict_list(kb.get("frequent_complications"))
+    red_flags = _dict_list(kb.get("rare_critical_red_flags"))
 
     if not freq_list:
         st.info(
@@ -455,18 +531,17 @@ def _render_subtab_complications(kb: dict[str, Any], nos_id: str) -> None:
             "осложнений (`extracted_complications` / `Clavien–Dindo`). Ниже приведена сводная таблица текстовых "
             "профилей осложнений из раздела методик (режим только для чтения, данные `v1.x` не изменяются)."
         )
-        modalities = kb.get("modalities", [])
+        modalities = _dict_list(kb.get("modalities"))
         if modalities:
             df_v1_comp = pd.DataFrame(
                 [
                     {
-                        "Класс": m.get("group", "—"),
-                        "Методика лечения": m.get("name", "—"),
-                        "Профиль осложнений (v1.x)": m.get("complications_profile", "—"),
-                        "Реабилитация": m.get("recovery_time", "—"),
+                        "Класс": _clean_str(m.get("group")),
+                        "Методика лечения": _clean_str(m.get("name")),
+                        "Профиль осложнений (v1.x)": _clean_str(m.get("complications_profile")),
+                        "Реабилитация": _clean_str(m.get("recovery_time")),
                     }
                     for m in modalities
-                    if isinstance(m, dict)
                 ]
             )
             if not df_v1_comp.empty:
@@ -479,12 +554,12 @@ def _render_subtab_complications(kb: dict[str, Any], nos_id: str) -> None:
     for col_name, default_val in (
         ("modality", "—"),
         ("complication_name", "—"),
-        ("event_class", "true_complication"),
-        ("clavien_dindo_grade", "I"),
-        ("reversibility", "transient_self_limiting"),
+        ("event_class", "—"),
+        ("clavien_dindo_grade", "Не указан"),
+        ("reversibility", "—"),
         ("frequency_pct", "—"),
         ("frequency_median_num", 0.0),
-        ("sample_size_total", 0),
+        ("sample_size_total", None),
         ("time_window", "—"),
         ("anatomical_substrate", "—"),
         ("prevention_and_management", "—"),
@@ -493,15 +568,22 @@ def _render_subtab_complications(kb: dict[str, Any], nos_id: str) -> None:
         if col_name not in df_fc.columns:
             df_fc[col_name] = default_val
 
-    df_fc["modality"] = df_fc["modality"].fillna("—").astype(str)
-    df_fc["complication_name"] = df_fc["complication_name"].fillna("—").astype(str)
-    df_fc["event_class"] = df_fc["event_class"].fillna("true_complication").astype(str)
-    df_fc["clavien_dindo_grade"] = df_fc["clavien_dindo_grade"].fillna("I").astype(str)
-    df_fc["reversibility"] = df_fc["reversibility"].fillna("transient_self_limiting").astype(str)
-    df_fc["frequency_pct"] = df_fc["frequency_pct"].fillna("—").astype(str)
-    df_fc["time_window"] = df_fc["time_window"].fillna("—").replace("", "—").astype(str)
-    df_fc["anatomical_substrate"] = df_fc["anatomical_substrate"].fillna("—").astype(str)
-    df_fc["prevention_and_management"] = df_fc["prevention_and_management"].fillna("—").astype(str)
+    df_fc["modality"] = df_fc["modality"].apply(lambda v: _clean_str(v, "—"))
+    df_fc["complication_name"] = df_fc["complication_name"].apply(lambda v: _clean_str(v, "—"))
+    df_fc["event_class"] = df_fc["event_class"].apply(lambda v: _clean_str(v, "—"))
+    df_fc["clavien_dindo_grade"] = df_fc["clavien_dindo_grade"].apply(
+        lambda v: _clean_str(v, "Не указан")
+    )
+    df_fc["reversibility"] = df_fc["reversibility"].apply(lambda v: _clean_str(v, "—"))
+    df_fc["frequency_pct"] = df_fc["frequency_pct"].apply(lambda v: _clean_str(v, "—"))
+    df_fc["time_window"] = df_fc["time_window"].apply(lambda v: _clean_str(v, "—"))
+    df_fc["anatomical_substrate"] = df_fc["anatomical_substrate"].apply(lambda v: _clean_str(v, "—"))
+    df_fc["prevention_and_management"] = df_fc["prevention_and_management"].apply(
+        lambda v: _clean_str(v, "—")
+    )
+    df_fc["sample_size_total"] = df_fc["sample_size_total"].apply(
+        lambda v: _safe_int(v, default=-1)
+    ).map(lambda n: str(n) if n >= 0 else "—")
     df_fc["reversibility_ru"] = df_fc["reversibility"].map(
         lambda v: REVERSIBILITY_LABELS_RU.get(v, v)
     )
@@ -522,9 +604,11 @@ def _render_subtab_complications(kb: dict[str, Any], nos_id: str) -> None:
         )
         or "—"
     )
-    df_fc["frequency_median_num"] = pd.to_numeric(
-        df_fc["frequency_median_num"], errors="coerce"
-    ).fillna(0.0)
+    df_fc["frequency_median_num"] = (
+        pd.to_numeric(df_fc["frequency_median_num"], errors="coerce")
+        .replace([float("inf"), float("-inf")], float("nan"))
+        .fillna(0.0)
+    )
 
     mod_opts = list(dict.fromkeys(df_fc["modality"].tolist()))
     raw_grades = list(dict.fromkeys(df_fc["clavien_dindo_grade"].tolist()))
@@ -712,18 +796,12 @@ def _render_subtab_complications(kb: dict[str, Any], nos_id: str) -> None:
 
 
 def _render_subtab_clinical_nuances(kb: dict[str, Any]) -> None:
-    """Subtab 2.6: Clinical decision nuances — workhorses, gray zones & salvage niches (D-03, T-19-02)."""
+    """Subtab 2.6: Clinical decision nuances — workhorses, gray zones & salvage niches (D-03, T-19-02, WR-01, WR-06)."""
     nuances = kb.get("clinical_decision_nuances")
     nuances_dict = nuances if isinstance(nuances, dict) else {}
-    workhorses = [
-        x for x in (nuances_dict.get("universal_workhorse_modalities") or []) if isinstance(x, dict)
-    ]
-    overlaps = [
-        x for x in (nuances_dict.get("overlapping_indications_and_gray_zones") or []) if isinstance(x, dict)
-    ]
-    niches = [
-        x for x in (nuances_dict.get("strict_niche_or_salvage_indications") or []) if isinstance(x, dict)
-    ]
+    workhorses = _dict_list(nuances_dict.get("universal_workhorse_modalities"))
+    overlaps = _dict_list(nuances_dict.get("overlapping_indications_and_gray_zones"))
+    niches = _dict_list(nuances_dict.get("strict_niche_or_salvage_indications"))
 
     if not workhorses and not overlaps and not niches:
         st.info(
@@ -737,13 +815,13 @@ def _render_subtab_clinical_nuances(kb: dict[str, Any]) -> None:
         st.markdown("#### 🛠️ Сквозные методики («рабочие лошадки»)")
         for wh in workhorses:
             with st.container(border=True):
-                st.markdown(f"##### {wh.get('modality', '—')}")
-                st.markdown(f"**Покрываемый спектр стадий:** {wh.get('applicable_spectrum', '—')}")
+                st.markdown(f"##### {_clean_str(wh.get('modality'))}")
+                st.markdown(f"**Покрываемый спектр стадий:** {_clean_str(wh.get('applicable_spectrum'))}")
                 col_l, col_r = st.columns(2)
-                col_l.markdown(f"**Практические нюансы:**\n\n{wh.get('practical_nuances', '—')}")
+                col_l.markdown(f"**Практические нюансы:**\n\n{_clean_str(wh.get('practical_nuances'))}")
                 col_r.markdown(
-                    f"**Факторы опыта хирурга и оснащения:**\n\n{wh.get('surgeon_and_equipment_factors', '—')}\n\n"
-                    f"**Компромиссы для пациента:**\n\n{wh.get('patient_tradeoffs', '—')}"
+                    f"**Факторы опыта хирурга и оснащения:**\n\n{_clean_str(wh.get('surgeon_and_equipment_factors'))}\n\n"
+                    f"**Компромиссы для пациента:**\n\n{_clean_str(wh.get('patient_tradeoffs'))}"
                 )
                 st.caption(f"Доказательная база: {_format_pmid_links_md(wh.get('evidence_pmids'))}")
 
@@ -754,14 +832,21 @@ def _render_subtab_clinical_nuances(kb: dict[str, Any]) -> None:
         for ov in overlaps:
             comp_mods = ov.get("competing_modalities")
             if isinstance(comp_mods, list):
-                comp_str = " vs ".join(str(m).strip() for m in comp_mods if str(m).strip()) or "—"
+                comp_str = (
+                    " vs ".join(
+                        cleaned
+                        for m in comp_mods
+                        if (cleaned := _clean_str(m, fallback=""))
+                    )
+                    or "—"
+                )
             else:
-                comp_str = str(comp_mods or "—")
+                comp_str = _clean_str(comp_mods)
             with st.container(border=True):
-                st.markdown(f"##### {ov.get('clinical_scenario', '—')}")
+                st.markdown(f"##### {_clean_str(ov.get('clinical_scenario'))}")
                 st.markdown(f"**Конкурирующие методики:** {comp_str}")
-                st.warning(f"**Почему нет одного «победителя»:** {ov.get('why_no_single_winner', '—')}")
-                st.markdown(f"**Решающие практические факторы:** {ov.get('decisive_practical_factors', '—')}")
+                st.warning(f"**Почему нет одного «победителя»:** {_clean_str(ov.get('why_no_single_winner'))}")
+                st.markdown(f"**Решающие практические факторы:** {_clean_str(ov.get('decisive_practical_factors'))}")
                 st.caption(f"Доказательная база: {_format_pmid_links_md(ov.get('evidence_pmids'))}")
 
     if niches:
@@ -770,25 +855,22 @@ def _render_subtab_clinical_nuances(kb: dict[str, Any]) -> None:
         st.markdown("#### 🎯 Узконишевые показания и методики спасения")
         for ni in niches:
             with st.container(border=True):
-                st.markdown(f"##### {ni.get('modality', '—')}")
+                st.markdown(f"##### {_clean_str(ni.get('modality'))}")
                 c_l, c_r = st.columns(2)
                 c_l.markdown(
-                    f"**Узкая ниша / роль спасения:**\n\n{ni.get('narrow_indication_or_salvage_role', '—')}"
+                    f"**Узкая ниша / роль спасения:**\n\n{_clean_str(ni.get('narrow_indication_or_salvage_role'))}"
                 )
                 c_r.markdown(
-                    f"**Почему не первая линия для всех:**\n\n{ni.get('why_not_first_line_for_all', '—')}"
+                    f"**Почему не первая линия для всех:**\n\n{_clean_str(ni.get('why_not_first_line_for_all'))}"
                 )
                 st.caption(f"Доказательная база: {_format_pmid_links_md(ni.get('evidence_pmids'))}")
 
 
 def _format_text_or_list(value: Any) -> str:
-    """Format scalar text or list of strings cleanly for tables and cards (v1.x trigger_finger compatibility)."""
+    """Format scalar text or list of strings cleanly for tables and cards (v1.x trigger_finger compatibility, WR-06)."""
     if isinstance(value, list):
-        return "; ".join(str(x).strip() for x in value if str(x).strip()) or "—"
-    if value is None:
-        return "—"
-    text = str(value).strip()
-    return text or "—"
+        return "; ".join(c for x in value if (c := _clean_str(x, fallback=""))) or "—"
+    return _clean_str(value)
 
 
 def render_tab_clinical_matrix(bundle: dict[str, Any]) -> None:
@@ -1547,10 +1629,10 @@ def render_tab_prisma_explorer(bundle: dict[str, Any]) -> None:
             view = view[mask]
 
         view["event_class_ru"] = view["event_class"].map(
-            lambda v: EVENT_CLASS_LABELS_RU.get(str(v), str(v or "—"))
+            lambda v: EVENT_CLASS_LABELS_RU.get(_clean_str(v, ""), _clean_str(v, "—"))
         )
         view["reversibility_ru"] = view["reversibility"].map(
-            lambda v: REVERSIBILITY_LABELS_RU.get(str(v), str(v or "—"))
+            lambda v: REVERSIBILITY_LABELS_RU.get(_clean_str(v, ""), _clean_str(v, "—"))
         )
 
         comp_cols = [
@@ -1654,6 +1736,7 @@ def render_tab_configurator_and_audit(bundle: dict[str, Any]) -> None:
                     capture_output=True,
                     text=True,
                     encoding="utf-8",
+                    errors="replace",
                     shell=False,
                     timeout=60,
                 )
@@ -1664,8 +1747,8 @@ def render_tab_configurator_and_audit(bundle: dict[str, Any]) -> None:
                 st.code(res.stdout + ("\n" + res.stderr if res.stderr else ""))
             except subprocess.TimeoutExpired:
                 st.error("Превышено время ожидания аудита verify_reports.py (60 с).")
-            except ValueError as exc:
-                st.error(f"Некорректный идентификатор нозологии для аудита: {exc}")
+            except (ValueError, OSError, UnicodeError) as exc:
+                st.error(f"Не удалось выполнить аудит verify_reports.py: {exc}")
 
         if bundle["verification_audit_md"]:
             st.markdown(bundle["verification_audit_md"])
@@ -1804,10 +1887,12 @@ def render_tab_configurator_and_audit(bundle: dict[str, Any]) -> None:
                 saved_path = save_new_nosology_config(payload)
                 st.success(f"Конфигурация сохранена: `{saved_path}`")
                 st.code(saved_path.read_text(encoding="utf-8"), language="yaml")
-            except (ValueError, PermissionError) as exc:
-                st.error(f"Ошибка сохранения: {exc}")
-            except Exception as exc:
-                st.error(f"Ошибка сохранения: {exc}")
+            except PermissionError as exc:
+                st.error(f"Защита замороженной нозологии v1.x: {exc}")
+            except ValueError as exc:
+                st.error(f"Ошибка валидации параметров нозологии: {exc}")
+            except OSError as exc:
+                st.error(f"Ошибка записи файла конфигурации: {exc}")
 
         st.markdown("##### 🚀 Команды запуска пайплайна для новой нозологии")
         st.code(

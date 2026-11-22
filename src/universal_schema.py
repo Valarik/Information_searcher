@@ -46,15 +46,22 @@ from src.extractor_common import (
     validate_nosology_id,
 )
 
-CONFIGS_DIR = PROJECT_ROOT / "configs"
-DATA_DIR = PROJECT_ROOT / "data"
-REPORTS_DIR = PROJECT_ROOT / "reports"
+_DEFAULT_PROJECT_ROOT = PROJECT_ROOT
+_DEFAULT_CONFIGS_DIR = PROJECT_ROOT / "configs"
+_DEFAULT_DATA_DIR = PROJECT_ROOT / "data"
+_DEFAULT_REPORTS_DIR = PROJECT_ROOT / "reports"
+
+CONFIGS_DIR = _DEFAULT_CONFIGS_DIR
+DATA_DIR = _DEFAULT_DATA_DIR
+REPORTS_DIR = _DEFAULT_REPORTS_DIR
 
 FROZEN_V1_NOSOLOGIES = frozenset({"prom", "metroplasty_pregnancy", "trigger_finger"})
 
 
 def get_active_project_root() -> Path:
-    """Return active workspace root (INFO_SEARCHER_ROOT env override or repository root) (T-19-05)."""
+    """Return active workspace root (explicit monkeypatch, INFO_SEARCHER_ROOT override, or repo root) (T-19-05, WR-04)."""
+    if PROJECT_ROOT != _DEFAULT_PROJECT_ROOT:
+        return Path(PROJECT_ROOT).resolve()
     env_root = os.environ.get("INFO_SEARCHER_ROOT", "").strip()
     if env_root:
         return Path(env_root).resolve()
@@ -62,6 +69,8 @@ def get_active_project_root() -> Path:
 
 
 def _get_configs_dir() -> Path:
+    if CONFIGS_DIR != _DEFAULT_CONFIGS_DIR:
+        return CONFIGS_DIR
     env_root = os.environ.get("INFO_SEARCHER_ROOT", "").strip()
     if env_root:
         return Path(env_root).resolve() / "configs"
@@ -69,6 +78,8 @@ def _get_configs_dir() -> Path:
 
 
 def _get_data_dir() -> Path:
+    if DATA_DIR != _DEFAULT_DATA_DIR:
+        return DATA_DIR
     env_root = os.environ.get("INFO_SEARCHER_ROOT", "").strip()
     if env_root:
         return Path(env_root).resolve() / "data"
@@ -76,6 +87,8 @@ def _get_data_dir() -> Path:
 
 
 def _get_reports_dir() -> Path:
+    if REPORTS_DIR != _DEFAULT_REPORTS_DIR:
+        return REPORTS_DIR
     env_root = os.environ.get("INFO_SEARCHER_ROOT", "").strip()
     if env_root:
         return Path(env_root).resolve() / "reports"
@@ -950,9 +963,25 @@ def render_printable_html(
 </html>"""
 
 
+_CSV_FORMULA_PREFIXES = ("=", "@", "\t", "\r")
+
+
+def _sanitize_csv_cell(value: Any) -> Any:
+    """Neutralize leading Excel formula triggers (=, @, \\t, \\r) while leaving clinical +/- untouched (T-19-04, IN-06)."""
+    if isinstance(value, str) and value and value[0] in _CSV_FORMULA_PREFIXES:
+        return "'" + value
+    return value
+
+
 def dataframe_to_csv_bytes(df: pd.DataFrame) -> bytes:
-    """Serialize DataFrame to UTF-8 with BOM (`utf-8-sig`) bytes for Russian Excel compatibility (`D-03`)."""
-    return df.to_csv(index=False).encode("utf-8-sig")
+    """Serialize DataFrame to UTF-8 with BOM (`utf-8-sig`) bytes for Russian Excel compatibility (`D-03`, `IN-06`)."""
+    if df.empty:
+        return df.to_csv(index=False).encode("utf-8-sig")
+    safe_df = df.copy()
+    for col in safe_df.columns:
+        if safe_df[col].dtype == object or pd.api.types.is_string_dtype(safe_df[col].dtype):
+            safe_df[col] = safe_df[col].map(_sanitize_csv_cell)
+    return safe_df.to_csv(index=False).encode("utf-8-sig")
 
 
 def query_articles_df(db_path: Path, included_only: bool = True) -> pd.DataFrame:
@@ -1157,12 +1186,8 @@ def query_complications_df(db_path: Path, *, include_casuistry: bool = True) -> 
     finally:
         conn.close()
     if not df.empty:
-        df["pubmed_url"] = df["pmid"].apply(
-            lambda x: f"https://pubmed.ncbi.nlm.nih.gov/{x}/" if pd.notna(x) and str(x).strip() else ""
-        )
-        df["doi_url"] = df["doi"].apply(
-            lambda x: f"https://doi.org/{x}" if pd.notna(x) and str(x).strip() else ""
-        )
+        df["pubmed_url"] = df["pmid"].apply(_format_valid_pubmed_url)
+        df["doi_url"] = df["doi"].apply(_format_valid_doi_url)
     return df
 
 
@@ -1171,7 +1196,7 @@ def save_new_nosology_config(
     *,
     allow_frozen_overwrite: bool = False,
 ) -> Path:
-    """Save a new nosology configuration to `configs/<id>.yaml` with normalized surgical_focus, query keys, and frozen v1.x guard (T-17-05, T-19-01, D-05.3)."""
+    """Save a new nosology configuration to `configs/<id>.yaml` with normalized surgical_focus, query keys, and frozen v1.x guard (T-17-05, T-19-01, D-05.3, CR-02, IN-01)."""
     payload = copy.deepcopy(config_payload)
     nos_meta = payload.get("nosology")
     if not isinstance(nos_meta, dict):
@@ -1195,22 +1220,29 @@ def save_new_nosology_config(
     queries_dict = payload.get("queries")
     if isinstance(queries_dict, dict):
         if "openalex" in queries_dict:
-            legacy_openalex = queries_dict.pop("openalex")
-            if not str(queries_dict.get("openalex_search") or "").strip() and legacy_openalex not in (None, ""):
+            legacy_openalex = str(queries_dict.pop("openalex") or "").strip()
+            if not str(queries_dict.get("openalex_search") or "").strip() and legacy_openalex:
                 queries_dict["openalex_search"] = legacy_openalex
         if "clinicaltrials" in queries_dict:
-            legacy_ct = queries_dict.pop("clinicaltrials")
-            if not str(queries_dict.get("clinical_trials_condition") or "").strip() and legacy_ct not in (None, ""):
+            legacy_ct = str(queries_dict.pop("clinicaltrials") or "").strip()
+            if not str(queries_dict.get("clinical_trials_condition") or "").strip() and legacy_ct:
                 queries_dict["clinical_trials_condition"] = legacy_ct
 
     comp_queries = payload.get("complications_queries")
     if isinstance(comp_queries, dict):
-        cleaned_queries = {
-            k: v
-            for k, v in comp_queries.items()
-            if k in ("pubmed", "europepmc", "max_results", "pubmed_max_results", "europepmc_max_results")
-            and v not in (None, "")
-        }
+        cleaned_queries = {}
+        for k, v in comp_queries.items():
+            if k not in ("pubmed", "europepmc", "max_results", "pubmed_max_results", "europepmc_max_results"):
+                continue
+            if v is None:
+                continue
+            if isinstance(v, str):
+                v_stripped = v.strip()
+                if not v_stripped:
+                    continue
+                cleaned_queries[k] = v_stripped
+            else:
+                cleaned_queries[k] = v
         if cleaned_queries:
             payload["complications_queries"] = cleaned_queries
         else:
@@ -1219,14 +1251,24 @@ def save_new_nosology_config(
     target_configs = _get_configs_dir()
     target_configs_resolved = target_configs.resolve()
     out_path = (target_configs_resolved / f"{nos_id}.yaml").resolve()
-    if out_path.parent != target_configs_resolved:
-        raise ValueError("Недопустимый путь сохранения конфигурации нозологии")
-    frozen_repo_cfg = (PROJECT_ROOT / "configs" / f"{nos_id}.yaml").resolve()
-    if out_path == frozen_repo_cfg and nos_id in FROZEN_V1_NOSOLOGIES and not allow_frozen_overwrite:
+    frozen_repo_cfg = (_DEFAULT_PROJECT_ROOT / "configs" / f"{nos_id}.yaml").resolve()
+    if (
+        nos_id.lower() in FROZEN_V1_NOSOLOGIES
+        and os.path.normcase(str(out_path)) == os.path.normcase(str(frozen_repo_cfg))
+        and not allow_frozen_overwrite
+    ):
         raise PermissionError(
             f"Замороженная конфигурация v1.x '{nos_id}' защищена от перезаписи ({out_path}). "
             "Для явной перезаписи передайте allow_frozen_overwrite=True."
         )
+    if CONFIGS_DIR == _DEFAULT_CONFIGS_DIR:
+        active_root = get_active_project_root()
+        if not Path(os.path.normcase(str(target_configs_resolved))).is_relative_to(
+            Path(os.path.normcase(str(active_root)))
+        ):
+            raise ValueError(f"Configs directory escapes active root: {target_configs_resolved}")
+    if os.path.normcase(str(out_path.parent)) != os.path.normcase(str(target_configs_resolved)):
+        raise ValueError("Недопустимый путь сохранения конфигурации нозологии")
     target_configs.mkdir(parents=True, exist_ok=True)
     yaml_str = yaml.safe_dump(payload, allow_unicode=True, sort_keys=False)
     out_path.write_text(yaml_str, encoding="utf-8")
@@ -1234,6 +1276,35 @@ def save_new_nosology_config(
 
 
 _PMID_STR_RE = re.compile(r"^[1-9]\d{0,8}$")
+_DOI_PREFIX_RE = re.compile(r"^(?:https?://(?:dx\.)?doi\.org/|doi:\s*)", re.IGNORECASE)
+
+
+def _format_valid_pubmed_url(raw_pmid: Any) -> str:
+    """Validate PMID against ^[1-9]\\d{0,8}$ before constructing a PubMed URL (IN-04)."""
+    if raw_pmid is None or isinstance(raw_pmid, bool):
+        return ""
+    if isinstance(raw_pmid, float):
+        if not math.isfinite(raw_pmid) or not raw_pmid.is_integer():
+            return ""
+        pid = str(int(raw_pmid))
+    else:
+        pid = str(raw_pmid).strip()
+    return f"https://pubmed.ncbi.nlm.nih.gov/{pid}/" if _PMID_STR_RE.fullmatch(pid) else ""
+
+
+def _format_valid_doi_url(raw_doi: Any) -> str:
+    """Normalize DOI prefix (strip leading https://doi.org/, http://dx.doi.org/, doi:) before building URL (IN-04)."""
+    if raw_doi is None or isinstance(raw_doi, bool):
+        return ""
+    if isinstance(raw_doi, float) and not math.isfinite(raw_doi):
+        return ""
+    text = str(raw_doi).strip()
+    if not text:
+        return ""
+    cleaned = _DOI_PREFIX_RE.sub("", text).strip()
+    if not cleaned or any(ch.isspace() for ch in cleaned):
+        return ""
+    return f"https://doi.org/{cleaned}"
 
 
 def _is_nonempty_str(value: Any) -> bool:
