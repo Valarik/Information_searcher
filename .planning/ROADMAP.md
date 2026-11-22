@@ -196,3 +196,19 @@ Plans:
   1. Во вкладке 2 (`app.py`) отображаются интерактивные диаграммы частых осложнений (частота `%` и распределение по `Clavien–Dindo` в разрезе методик, фильтр обратимых/стойких осложнений) и панель клинических компромиссов (`clinical_decision_nuances`), а во вкладке 3 — таблица `extracted_complications` с поиском и экспортом в `.csv`.
   2. Конфигуратор новой нозологии во вкладке 4 (`app.py`) содержит переключатель хирургического профиля (`surgical_focus`) и автошаблон запросов по осложнениям.
   3. `src/docx_exporter.py` и комплект автотестов (`tests/test_v2_engine.py` + `uv run app.py --self-test`) проходят без единой ошибки как на эталонном наборе данных `v2.0`, так и на всех существующих нозологиях `v1.x`.
+
+**Plans**: 3 plans
+
+Plans:
+
+**Wave 1**
+
+- [ ] 19-01: Бэкенд `v2.0` экспорта MS Word (`src/docx_exporter.py`), изоляция `INFO_SEARCHER_ROOT` и нормализация YAML (`src/universal_schema.py`), поддержка 6 модулей в `src/verify_reports.py`
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
+- [ ] 19-02: Веб-интерфейс `app.py` `v2.0` — подвкладки `2.5` (`Clavien–Dindo`) и `2.6` (`clinical_decision_nuances`), таблица `extracted_complications` во вкладке 3, конфигуратор `surgical_focus` + `--read-only` аудит во вкладке 4 и расширенный `--self-test`
+
+**Wave 3** *(blocked on Wave 2 completion)*
+
+- [ ] 19-03: Комплект сквозных автотестов `tests/test_v2_engine.py` (синтетическая фикстура `v2.0`, OpenXML DOM, `AppTest` 1–4, охрана неизменности 3 замороженных `v1.x` нозологий) и финальный прогон `pytest` + `app.py --self-test`

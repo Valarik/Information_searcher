@@ -1,8 +1,8 @@
 ---
 phase: 19
 slug: app-py-docx-v2-0
-status: draft
-nyquist_compliant: false
+status: ready
+nyquist_compliant: true
 wave_0_complete: true
 created: 2026-11-22
 ---
@@ -42,7 +42,8 @@ created: 2026-11-22
 | 19-01-02 | 01 | 1 | UI-02, EXPORT-02 (D-01, D-05, D-08) | T-19-01, T-19-05 | `universal_schema.py` (`INFO_SEARCHER_ROOT` + `discover_nosologies(configs_dir=None)` + frozen config overwrite guard) & `verify_reports.py` (`>= 5` modules for 6-module `v2.0` + `INFO_SEARCHER_ROOT`) | unit + integration | `uv run --with pytest --with pyyaml --with pandas --with markdown --with truststore pytest tests/test_phase17_complications.py tests/test_phase18_humanizer.py -v` | ✅ | ⬜ pending |
 | 19-02-01 | 02 | 2 | UI-02 (D-01, D-02, D-03) | T-19-02, T-19-05 | `app.py`: PEP 723 `truststore`, sidebar `Строк осложнений`, Tab 1 dynamic modules & unified `build_executive_docx_bytes` / `build_full_dossier_docx_bytes`, Tab 2 subtabs `2.5` (4 filters, 2 Plotly charts, CSV, Red Flags, `v1.x` fallback) & `2.6` (3 `clinical_decision_nuances` blocks, `v1.x` fallback), 0 `unsafe_allow_html` in new UI | smoke + AppTest | `uv run app.py --self-test` | ✅ | ⬜ pending |
 | 19-02-02 | 02 | 2 | UI-02, EXPORT-02 (D-04, D-05, D-08) | T-19-01, T-19-03 | `app.py`: Tab 3 5th radio `extracted_complications` (filters, casuistry toggle, links, `.csv`, read-only `v1.x`), Tab 4 `surgical_focus` live preview above `st.form`, aligned `openalex_search` / `clinical_trials_condition`, safe default `carpal_tunnel_syndrome`, `--read-only` audit button, extended `run_self_test()`, `width="stretch"` | smoke + AppTest | `uv run app.py --self-test` | ✅ | ⬜ pending |
-| 19-03-01 | 03 | 3 | UI-02, EXPORT-02 (D-06, D-07, D-08) | T-19-01..T-19-05 | `tests/test_v2_engine.py`: full E2E synthetic `v2.0` (SQLite -> aggregation -> 6-module `kb_index v2.0` -> `verify_reports --schema-version v2 --read-only` -> OpenXML `.docx` DOM assertions -> isolated `AppTest` Tabs 1–4) + frozen `v1.x` (`prom`, `metroplasty_pregnancy`, `trigger_finger`) SHA-256/`mtime_ns`/`git status` zero-mutation gate | e2e + regression | `uv run --with pytest --with streamlit --with plotly --with pyyaml --with pandas --with markdown --with truststore pytest tests/ -v` | ❌ Created in 19-03 | ⬜ pending |
+| 19-03-01 | 03 | 3 | UI-02, EXPORT-02 (D-01..D-08) | T-19-01..T-19-05 | `tests/test_v2_engine.py`: full E2E synthetic 6-module `v2.0` (SQLite -> aggregation -> `kb_index v2.0` -> `verify_reports --schema-version v2 --read-only` -> OpenXML `.docx` DOM assertions -> security guards -> isolated `AppTest` Tabs 1–4) | e2e + AppTest | `uv run --with pytest --with streamlit --with plotly --with pyyaml --with pandas --with markdown --with truststore pytest tests/test_v2_engine.py -v` | ❌ Created in 19-03-01 | ⬜ pending |
+| 19-03-02 | 03 | 3 | UI-02, EXPORT-02 (D-06, D-07, D-08) | T-19-01, T-19-05 | `tests/test_v2_engine.py`: frozen `v1.x` (`prom`, `metroplasty_pregnancy`, `trigger_finger`) SHA-256/`mtime_ns`/`st_size`/no `-wal`/`-shm`/`git status` zero-mutation gate + full `pytest tests/ -v` + `uv run app.py --self-test` | regression + gate | `uv run --with pytest --with streamlit --with plotly --with pyyaml --with pandas --with markdown --with truststore pytest tests/ -v; uv run app.py --self-test` | ❌ Created in 19-03-01 | ⬜ pending |
 
 *Status: ⬜ pending · ✅ green · ❌ red · ⚠️ flaky*
 
@@ -62,11 +63,11 @@ All phase behaviors have automated verification (`pytest` + `Streamlit AppTest` 
 
 ## Validation Sign-Off
 
-- [ ] All tasks have `<automated>` verify or Wave 0 dependencies
-- [ ] Sampling continuity: no 3 consecutive tasks without automated verify
-- [ ] Wave 0 covers all MISSING references
-- [ ] No watch-mode flags
-- [ ] Feedback latency < 30s
-- [ ] `nyquist_compliant: true` set in frontmatter
+- [x] All tasks have `<automated>` verify or Wave 0 dependencies
+- [x] Sampling continuity: no 3 consecutive tasks without automated verify
+- [x] Wave 0 covers all MISSING references
+- [x] No watch-mode flags
+- [x] Feedback latency < 30s
+- [x] `nyquist_compliant: true` set in frontmatter
 
-**Approval:** pending (will be updated by planner & checker once PLAN files are finalized)
+**Approval:** approved by planner (all 6 tasks across Plans 19-01..19-03 aligned with automated `<verify>` gates)
