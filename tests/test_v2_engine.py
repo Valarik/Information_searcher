@@ -21,12 +21,16 @@ Covers Phase 19 (UI-02, EXPORT-02, D-01..D-08, T-19-01..T-19-05):
    preview & YAML save (openalex_search / clinical_trials_condition), and
    read-only btn_run_verify subprocess verification (--verify --read-only,
    shell=False, 0 file mutations).
+5. Frozen v1.x immutability & backward-compatibility regression suite:
+   all 3 frozen nosologies (prom, metroplasty_pregnancy, trigger_finger) with
+   recursive SHA-256 + st_mtime_ns + st_size + no -wal/-shm + git status gate.
 """
 
 from __future__ import annotations
 
 import copy
 import csv
+import hashlib
 import io
 import json
 import subprocess
@@ -1275,3 +1279,192 @@ def test_v2_isolated_apptest_tabs_and_configurator(
             assert not (ws["rep_dir"] / docx_name).exists()
     finally:
         st.cache_data.clear()
+
+
+# ===========================================================================
+# 5. Frozen v1.x zero-mutation & backward-compatibility regression suite
+# ===========================================================================
+
+
+FROZEN_V1_IDS: tuple[str, ...] = ("prom", "metroplasty_pregnancy", "trigger_finger")
+
+
+def _sha256_file(path: Path) -> str:
+    """Compute SHA-256 hex digest of a file using streaming reads."""
+    digest = hashlib.sha256()
+    with path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(65536), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _snapshot_frozen_v1_tree() -> tuple[dict[Path, tuple[str, int, int]], dict[str, set[Path]]]:
+    """Capture recursive (sha256_hex, st_mtime_ns, st_size) snapshot of all 3 frozen v1.x corpora & configs.
+
+    Tracks every file across data/{id}, reports/{id}, and configs/{id}.yaml (including literature.db and
+    any pre-existing 0-byte .db-wal files), and separately tracks gitignored SQLite .db-wal/.db-shm sidecar
+    sets so zero new sidecars and zero WAL writes (size == 0) are strictly enforced even on WAL-mode DBs.
+    """
+    snapshot: dict[Path, tuple[str, int, int]] = {}
+    sidecars: dict[str, set[Path]] = {"wal": set(), "shm": set()}
+    for nos_id in FROZEN_V1_IDS:
+        data_dir = PROJECT_ROOT / "data" / nos_id
+        rep_dir = PROJECT_ROOT / "reports" / nos_id
+        cfg_file = PROJECT_ROOT / "configs" / f"{nos_id}.yaml"
+
+        assert data_dir.exists(), f"Missing frozen data directory: {data_dir}"
+        assert rep_dir.exists(), f"Missing frozen reports directory: {rep_dir}"
+        assert cfg_file.exists(), f"Missing frozen config file: {cfg_file}"
+
+        for wal_file in data_dir.rglob("*.db-wal"):
+            assert wal_file.stat().st_size == 0, (
+                f"Non-empty WAL sidecar indicates uncommitted DB write: {wal_file}"
+            )
+            sidecars["wal"].add(wal_file.resolve())
+        for shm_file in data_dir.rglob("*.db-shm"):
+            sidecars["shm"].add(shm_file.resolve())
+
+        st_cfg = cfg_file.stat()
+        snapshot[cfg_file.resolve()] = (_sha256_file(cfg_file), st_cfg.st_mtime_ns, st_cfg.st_size)
+
+        for root_dir in (data_dir, rep_dir):
+            for file_path in sorted(p for p in root_dir.rglob("*") if p.is_file()):
+                # SQLite ?mode=ro updates mmap timestamp on pre-existing gitignored .db-shm lock files;
+                # sidecar creation is strictly gated via sidecars["shm"], while .db and 0-byte .db-wal are hashed.
+                if file_path.name.endswith(".db-shm"):
+                    continue
+                st_info = file_path.stat()
+                snapshot[file_path.resolve()] = (
+                    _sha256_file(file_path),
+                    st_info.st_mtime_ns,
+                    st_info.st_size,
+                )
+    return snapshot, sidecars
+
+
+def test_v1_frozen_regression_and_zero_mutation(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verify 100% v1.x backward compatibility and byte-level zero mutation on prom, metroplasty_pregnancy, trigger_finger."""
+    monkeypatch.delenv("INFO_SEARCHER_ROOT", raising=False)
+    monkeypatch.setenv("INFO_SEARCHER_APPTEST_ACTIVE", "1")
+    st.cache_data.clear()
+
+    before_files, before_sidecars = _snapshot_frozen_v1_tree()
+    assert len(before_files) >= 9
+
+    try:
+        # 1) Data layer, schema verification, read-only report audit, in-memory DOCX, and write guards
+        for nos_id in FROZEN_V1_IDS:
+            bundle = universal_schema.load_nosology_bundle(nos_id)
+            kb = bundle["kb_index"]
+
+            # Even with in-memory default empty clinical_decision_nuances, v1.x MUST NOT be treated as v2.0
+            assert docx_exporter.is_v2_kb_index(kb) is False, f"Frozen v1.x '{nos_id}' misclassified as v2.0"
+
+            df_comp = universal_schema.query_complications_df(bundle["db_path"])
+            assert df_comp.empty, f"Expected empty complications DataFrame for frozen v1.x '{nos_id}'"
+
+            assert universal_schema.verify_universal_schema(nos_id, schema_version="auto") == 0
+
+            res = verify_reports.verify_all_reports(nos_id, schema_version="auto", write_outputs=False)
+            assert res["passed"] is True
+            assert res["schema_version"] == "1.x"
+            assert res["read_only"] is True
+
+            # In-memory DOCX builders: valid OpenXML + <w:cantSplit/>/<w:tblHeader/>, strictly NO v2.0 appendices (D-06)
+            exec_bytes = docx_exporter.build_executive_docx_bytes(bundle["executive_summary_md"], kb)
+            kb_module_texts = [m["content"] for m in bundle["kb_modules"] if m.get("content")]
+            full_bytes = docx_exporter.build_full_dossier_docx_bytes(
+                bundle["executive_summary_md"],
+                bundle["dissertation_md"],
+                kb_module_texts,
+                kb,
+            )
+            for doc_kind, payload_bytes in (("executive", exec_bytes), ("full_dossier", full_bytes)):
+                assert payload_bytes.startswith(b"PK") and len(payload_bytes) > 2048
+                root, _ = _extract_docx_xml_root(payload_bytes)
+                _assert_openxml_table_invariants(root, min_tables=1)
+                doc_text = _element_plain_text(root)
+                assert "Приложение А. Профиль частых осложнений" not in doc_text, (
+                    f"Unexpected v2.0 Appendix A in frozen v1.x {nos_id} ({doc_kind})"
+                )
+                assert "Приложение Б. Клинические компромиссы" not in doc_text, (
+                    f"Unexpected v2.0 Appendix B in frozen v1.x {nos_id} ({doc_kind})"
+                )
+
+            # Repo-root overwrite protection (D-07.3, T-19-01)
+            with pytest.raises(PermissionError):
+                docx_exporter.export_nosology_docx_files(nos_id)
+            with pytest.raises(PermissionError):
+                universal_schema.save_new_nosology_config({"nosology": {"id": nos_id}})
+
+        # 2) Full headless Streamlit AppTest across all 3 frozen v1.x nosologies on repo root
+        at = AppTest.from_file(str(PROJECT_ROOT / "app.py"), default_timeout=60).run(timeout=60)
+        assert len(at.exception) == 0, f"Initial repo-root AppTest raised: {at.exception}"
+
+        for nos_id in FROZEN_V1_IDS:
+            at.selectbox(key="sidebar_nosology_select").set_value(nos_id).run(timeout=60)
+            assert len(at.exception) == 0, f"AppTest failed selecting frozen v1.x '{nos_id}': {at.exception}"
+
+            # Sidebar must NOT display v2.0 "Строк осложнений" metric on v1.x
+            metric_labels = {m.label for m in at.metric}
+            assert "Строк осложнений" not in metric_labels, (
+                f"Unexpected v2.0 'Строк осложнений' metric for frozen v1.x '{nos_id}'"
+            )
+
+            # Tab 1 Mode C must display 5 modules for frozen v1.x
+            mode_opts = list(at.radio(key="tab1_report_mode").options)
+            mode_c = next(o for o in mode_opts if o.startswith("Режим В"))
+            assert "5" in mode_c, f"Expected 5 KB modules for frozen v1.x '{nos_id}', got {mode_c!r}"
+
+            # Subtabs 2.5 and 2.6 must exist and render soft v1.x fallback info banners
+            t25 = next((t for t in at.tabs if "2.5" in t.label), None)
+            t26 = next((t for t in at.tabs if "2.6" in t.label), None)
+            assert t25 is not None and t26 is not None, f"Missing 2.5/2.6 subtabs for '{nos_id}'"
+            assert len(t25.info) >= 1, f"Missing v1.x fallback info banner in subtab 2.5 for '{nos_id}'"
+            assert len(t26.info) >= 1, f"Missing v1.x fallback info banner in subtab 2.6 for '{nos_id}'"
+
+            # Tab 3 option 5 (extracted_complications) renders calm read-only 0-row info message
+            t3_opts = list(at.radio(key="tab3_table_choice").options)
+            opt1 = next(o for o in t3_opts if o.startswith("1."))
+            opt5 = next(o for o in t3_opts if o.startswith("5."))
+            at.radio(key="tab3_table_choice").set_value(opt5).run(timeout=60)
+            assert len(at.exception) == 0, f"Tab 3 option 5 failed for frozen v1.x '{nos_id}': {at.exception}"
+
+            t3 = next(t for t in at.tabs if t.label.startswith("📚 3."))
+            assert len(t3.info) >= 1, f"Missing read-only 0-row st.info in Tab 3 option 5 for '{nos_id}'"
+            assert "extracted_complications" in _collect_block_text(t3)
+
+            # Reset Tab 3 back to option 1 before switching to next nosology
+            at.radio(key="tab3_table_choice").set_value(opt1).run(timeout=60)
+            assert len(at.exception) == 0
+    finally:
+        st.cache_data.clear()
+
+    # 3) Byte-level immutability gate: identical files, SHA-256, st_mtime_ns, st_size, and zero new -wal/-shm
+    after_files, after_sidecars = _snapshot_frozen_v1_tree()
+    assert after_files == before_files, (
+        "Frozen v1.x files mutated (SHA-256 / st_mtime_ns / st_size mismatch)!"
+    )
+    assert after_sidecars == before_sidecars, (
+        f"SQLite WAL/SHM sidecar set changed: before={before_sidecars}, after={after_sidecars}"
+    )
+
+    # 4) Git working-tree immutability gate across all 6 frozen v1.x directories
+    git_res = subprocess.run(
+        [
+            "git",
+            "status",
+            "--porcelain",
+            "data/prom",
+            "data/metroplasty_pregnancy",
+            "data/trigger_finger",
+            "reports/prom",
+            "reports/metroplasty_pregnancy",
+            "reports/trigger_finger",
+        ],
+        cwd=PROJECT_ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert git_res.stdout.strip() == "", f"Frozen v1.x git tree dirty:\n{git_res.stdout}"
