@@ -1,14 +1,15 @@
 # /// script
 # requires-python = ">=3.11"
 # dependencies = [
-#   "streamlit>=1.38.0",
+#   "streamlit>=1.50.0",
 #   "pandas>=2.2.0",
 #   "plotly>=5.22.0",
 #   "markdown>=3.6",
 #   "pyyaml>=6.0.1",
+#   "truststore>=0.10.0",
 # ]
 # ///
-"""Universal Multi-Nosology Clinical Evidence & Synthesis Platform (`app.py`, Phase 4: UI-01, D-01..D-03).
+"""Universal Multi-Nosology Clinical Evidence & Synthesis Platform (`app.py`, v2.0: UI-01, UI-02, EXPORT-02).
 
 Launch interactively:
     uv run streamlit run app.py
@@ -37,15 +38,25 @@ import yaml
 
 from src.docx_exporter import (
     build_docx_bytes_from_markdown,
-    build_docx_bytes_from_markdown_sections,
+    build_executive_docx_bytes,
+    build_full_dossier_docx_bytes,
 )
+from src.extractor_common import (
+    VALID_CLAVIEN_DINDO,
+    VALID_EVENT_CLASS,
+    VALID_REVERSIBILITY,
+    validate_nosology_id,
+)
+from src.harvester import build_complications_queries
 from src.universal_schema import (
     dataframe_to_csv_bytes,
     discover_nosologies,
+    get_active_project_root,
     load_nosology_bundle,
     query_articles_df,
     query_clinical_evidence_df,
     query_clinical_trials_df,
+    query_complications_df,
     query_mechanisms_df,
     render_printable_html,
     save_new_nosology_config,
@@ -53,9 +64,56 @@ from src.universal_schema import (
     verify_universal_schema,
 )
 
+CLAVIEN_DINDO_ORDER: list[str] = list(VALID_CLAVIEN_DINDO)
+CLAVIEN_DINDO_COLORS: dict[str, str] = {
+    "I": "#10b981",
+    "II": "#3b82f6",
+    "IIIa": "#f59e0b",
+    "IIIb": "#f97316",
+    "IV": "#ef4444",
+    "V": "#7f1d1d",
+}
+REVERSIBILITY_LABELS_RU: dict[str, str] = {
+    "transient_self_limiting": "Транзиторное (самокупирующееся)",
+    "requires_conservative_therapy": "Требует консервативной терапии",
+    "requires_reoperation": "Требует повторной операции / ревизии",
+    "permanent_deficit": "Стойкий дефицит",
+}
+REVERSIBILITY_COLORS: dict[str, str] = {
+    "transient_self_limiting": "#10b981",
+    "requires_conservative_therapy": "#3b82f6",
+    "requires_reoperation": "#f97316",
+    "permanent_deficit": "#b91c1c",
+}
+REVERSIBILITY_COLORS_RU: dict[str, str] = {
+    REVERSIBILITY_LABELS_RU[k]: v for k, v in REVERSIBILITY_COLORS.items()
+}
+EVENT_CLASS_LABELS_RU: dict[str, str] = {
+    "true_complication": "Истинное осложнение",
+    "transient_postop_sequela": "Транзиторное послеоперационное явление",
+}
+_PMID_RE = re.compile(r"^[1-9]\d{0,8}$")
+
+
+def _format_pmid_links_md(pmids: Any) -> str:
+    """Validate PMIDs strictly against ^[1-9]\\d{0,8}$ and return clickable Markdown PubMed links (T-19-02)."""
+    if not isinstance(pmids, list):
+        return "—"
+    links: list[str] = []
+    seen: set[str] = set()
+    for raw in pmids:
+        if raw is None or isinstance(raw, bool):
+            continue
+        pid = str(raw).strip()
+        if pid and _PMID_RE.fullmatch(pid) and pid not in seen:
+            seen.add(pid)
+            links.append(f"[PMID {pid}](https://pubmed.ncbi.nlm.nih.gov/{pid}/)")
+    return ", ".join(links) if links else "—"
+
 
 @st.cache_data(show_spinner=False)
-def cached_bundle(nosology_id: str) -> dict[str, Any]:
+def cached_bundle(nosology_id: str, workspace_root: str = "") -> dict[str, Any]:
+    _ = workspace_root
     return load_nosology_bundle(nosology_id)
 
 
@@ -77,6 +135,11 @@ def cached_mechanisms(db_path_str: str) -> pd.DataFrame:
 @st.cache_data(show_spinner=False)
 def cached_trials(db_path_str: str) -> pd.DataFrame:
     return query_clinical_trials_df(Path(db_path_str))
+
+
+@st.cache_data(show_spinner=False)
+def cached_complications(db_path_str: str, include_casuistry: bool = True) -> pd.DataFrame:
+    return query_complications_df(Path(db_path_str), include_casuistry=include_casuistry)
 
 
 def highlight_search_matches(md_text: str, query: str) -> tuple[str, int]:
@@ -107,7 +170,7 @@ def render_sidebar(nosologies: list[dict[str, Any]]) -> tuple[str, dict[str, Any
             key="sidebar_nosology_select",
         )
 
-        bundle = cached_bundle(selected_id)
+        bundle = cached_bundle(selected_id, workspace_root=str(get_active_project_root()))
         kb = bundle["kb_index"]
         meta = kb.get("nosology_meta", {})
         stats = meta.get("corpus_stats", kb.get("corpus_stats", {}))
@@ -132,6 +195,10 @@ def render_sidebar(nosologies: list[dict[str, Any]]) -> tuple[str, dict[str, Any
         c5.metric("Протоколов NCT", f"{stats.get('clinical_trials_nct', 0)}")
         c6.metric("Полнотекстов XML", f"{stats.get('fulltext_xml_count', 233)}")
 
+        comp_rows = int(stats.get("extracted_complications_rows", 0) or 0)
+        if comp_rows > 0 or str(kb.get("schema_version", "")) == "2.0":
+            st.metric("Строк осложнений", f"{comp_rows:,}".replace(",", " "))
+
         st.divider()
         st.markdown("### 📥 Быстрый экспорт отчётов (Word .docx / MD / HTML)")
         DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
@@ -141,28 +208,33 @@ def render_sidebar(nosologies: list[dict[str, Any]]) -> tuple[str, dict[str, Any
                 data=build_docx_bytes_from_markdown(bundle["dissertation_md"]),
                 file_name=f"{selected_id}_dissertation_report.docx",
                 mime=DOCX_MIME,
-                use_container_width=True,
+                width="stretch",
                 key="sb_dl_diss_docx",
             )
         if bundle["executive_summary_md"]:
             st.download_button(
                 "⚡ Скачать Краткий отчёт (.docx)",
-                data=build_docx_bytes_from_markdown(bundle["executive_summary_md"]),
+                data=build_executive_docx_bytes(bundle["executive_summary_md"], kb),
                 file_name=f"{selected_id}_executive_summary.docx",
                 mime=DOCX_MIME,
-                use_container_width=True,
+                width="stretch",
                 key="sb_dl_exec_docx",
             )
         if bundle["dissertation_md"] and bundle["executive_summary_md"]:
-            full_sections = [bundle["executive_summary_md"], bundle["dissertation_md"]] + [
+            kb_module_texts = [
                 m["content"] for m in bundle.get("kb_modules", []) if m.get("content")
             ]
             st.download_button(
                 "📚 Скачать Полное досье (.docx)",
-                data=build_docx_bytes_from_markdown_sections(full_sections),
+                data=build_full_dossier_docx_bytes(
+                    bundle["executive_summary_md"],
+                    bundle["dissertation_md"],
+                    kb_module_texts,
+                    kb,
+                ),
                 file_name=f"{selected_id}_full_clinical_dossier.docx",
                 mime=DOCX_MIME,
-                use_container_width=True,
+                width="stretch",
                 key="sb_dl_full_docx",
             )
         if bundle["dissertation_md"]:
@@ -171,7 +243,7 @@ def render_sidebar(nosologies: list[dict[str, Any]]) -> tuple[str, dict[str, Any
                 data=bundle["dissertation_md"].encode("utf-8"),
                 file_name=f"{selected_id}_dissertation_report.md",
                 mime="text/markdown",
-                use_container_width=True,
+                width="stretch",
                 key="sb_dl_diss_md",
             )
             diss_html = render_printable_html(
@@ -184,7 +256,7 @@ def render_sidebar(nosologies: list[dict[str, Any]]) -> tuple[str, dict[str, Any
                 data=diss_html.encode("utf-8"),
                 file_name=f"{selected_id}_dissertation_report.html",
                 mime="text/html",
-                use_container_width=True,
+                width="stretch",
                 key="sb_dl_diss_html",
             )
 
@@ -196,6 +268,7 @@ def render_tab_reports(bundle: dict[str, Any]) -> None:
     kb = bundle["kb_index"]
     meta = kb.get("nosology_meta", {})
     nos_id = bundle["nosology_id"]
+    kb_mod_count = len(bundle.get("kb_modules", []))
 
     st.subheader("📑 Аналитические отчёты: 3 режима представления")
     col_mode, col_search = st.columns([2, 1])
@@ -205,7 +278,7 @@ def render_tab_reports(bundle: dict[str, Any]) -> None:
             options=[
                 "Режим А — Диссертационная монография (полный синтез)",
                 "Режим Б — Краткий клинический отчёт (Executive Summary)",
-                "Режим В — Модульная база знаний (5 тематических модулей)",
+                f"Режим В — Модульная база знаний ({kb_mod_count} тематических модулей)",
             ],
             horizontal=False,
             key="tab1_report_mode",
@@ -269,7 +342,7 @@ def render_tab_reports(bundle: dict[str, Any]) -> None:
         dl_col1, dl_col2, dl_col3 = st.columns(3)
         dl_col1.download_button(
             "📘 Скачать Краткий отчёт в Word (.docx)",
-            data=build_docx_bytes_from_markdown(md_text),
+            data=build_executive_docx_bytes(md_text, kb),
             file_name=f"{nos_id}_executive_summary.docx",
             mime=DOCX_MIME,
             key="t1_exec_docx_btn",
@@ -299,7 +372,7 @@ def render_tab_reports(bundle: dict[str, Any]) -> None:
             st.warning("Модули базы знаний не найдены.")
             return
         mod_options = {m["id"]: m["title"] for m in modules}
-        mod_options["__all__"] = "📚 Показать все 5 модулей базы знаний подряд"
+        mod_options["__all__"] = f"📚 Показать все {len(modules)} модулей базы знаний подряд"
         selected_mod_id = st.selectbox(
             "Выберите тематический модуль базы знаний:",
             options=list(mod_options.keys()),
@@ -343,19 +416,387 @@ def render_tab_reports(bundle: dict[str, Any]) -> None:
         st.markdown(rendered_md, unsafe_allow_html=True)
 
 
+def _render_red_flags_block(red_flags: list[dict[str, Any]]) -> None:
+    """Render rare critical complications (<1%) as native Streamlit warning cards without raw HTML (D-02.4, T-19-02)."""
+    if not red_flags:
+        return
+    st.divider()
+    st.markdown("#### 🚨 Красные флаги: редкие критические осложнения (<1%)")
+    st.error(
+        "Клиническое предупреждение: приведённые ниже осложнения встречаются редко (<1% наблюдений или единичные "
+        "критические случаи), но ассоциированы с тяжестью Clavien–Dindo III–V, необходимостью экстренной ревизии "
+        "или риском стойкого функционального дефицита."
+    )
+    for rf in red_flags:
+        rev_raw = str(rf.get("reversibility") or "").strip()
+        rev_ru = REVERSIBILITY_LABELS_RU.get(rev_raw, rev_raw or "—")
+        pmid_md = _format_pmid_links_md(rf.get("evidence_pmids"))
+        freq_disp = str(rf.get("frequency_pct") or "").strip() or "<1%"
+        with st.container(border=True):
+            st.markdown(
+                f"**{rf.get('complication_name', '—')}** — _{rf.get('modality', '—')}_ "
+                f"| **Clavien–Dindo:** `{rf.get('clavien_dindo_grade', '—')}` "
+                f"| **Частота:** `{freq_disp}` "
+                f"| **Обратимость:** {rev_ru}"
+            )
+            c_left, c_right = st.columns(2)
+            c_left.markdown(f"**Анатомический субстрат:** {rf.get('anatomical_substrate', '—')}")
+            c_right.markdown(f"**Профилактика и экстренная тактика:** {rf.get('prevention_and_management', '—')}")
+            st.caption(f"Доказательная база: {pmid_md}")
+
+
+def _render_subtab_complications(kb: dict[str, Any], nos_id: str) -> None:
+    """Subtab 2.5: Frequent complications profile (Clavien-Dindo), Plotly visuals, CSV & Red Flags (D-02, T-19-02)."""
+    freq_list = [x for x in (kb.get("frequent_complications") or []) if isinstance(x, dict)]
+    red_flags = [x for x in (kb.get("rare_critical_red_flags") or []) if isinstance(x, dict)]
+
+    if not freq_list:
+        st.info(
+            "Данная нозология собрана по архивной схеме **v1.x** без отдельного структурированного профиля частых "
+            "осложнений (`extracted_complications` / `Clavien–Dindo`). Ниже приведена сводная таблица текстовых "
+            "профилей осложнений из раздела методик (режим только для чтения, данные `v1.x` не изменяются)."
+        )
+        modalities = kb.get("modalities", [])
+        if modalities:
+            df_v1_comp = pd.DataFrame(
+                [
+                    {
+                        "Класс": m.get("group", "—"),
+                        "Методика лечения": m.get("name", "—"),
+                        "Профиль осложнений (v1.x)": m.get("complications_profile", "—"),
+                        "Реабилитация": m.get("recovery_time", "—"),
+                    }
+                    for m in modalities
+                    if isinstance(m, dict)
+                ]
+            )
+            if not df_v1_comp.empty:
+                st.dataframe(df_v1_comp, width="stretch", hide_index=True)
+        _render_red_flags_block(red_flags)
+        return
+
+    st.markdown("#### ⚠️ Профиль частых осложнений лечения (Clavien–Dindo, частота ≥ 1% в когортах)")
+    df_fc = pd.DataFrame(freq_list)
+    for col_name, default_val in (
+        ("modality", "—"),
+        ("complication_name", "—"),
+        ("event_class", "true_complication"),
+        ("clavien_dindo_grade", "I"),
+        ("reversibility", "transient_self_limiting"),
+        ("frequency_pct", "—"),
+        ("frequency_median_num", 0.0),
+        ("sample_size_total", 0),
+        ("time_window", "—"),
+        ("anatomical_substrate", "—"),
+        ("prevention_and_management", "—"),
+        ("evidence_pmids", None),
+    ):
+        if col_name not in df_fc.columns:
+            df_fc[col_name] = default_val
+
+    df_fc["modality"] = df_fc["modality"].fillna("—").astype(str)
+    df_fc["complication_name"] = df_fc["complication_name"].fillna("—").astype(str)
+    df_fc["event_class"] = df_fc["event_class"].fillna("true_complication").astype(str)
+    df_fc["clavien_dindo_grade"] = df_fc["clavien_dindo_grade"].fillna("I").astype(str)
+    df_fc["reversibility"] = df_fc["reversibility"].fillna("transient_self_limiting").astype(str)
+    df_fc["frequency_pct"] = df_fc["frequency_pct"].fillna("—").astype(str)
+    df_fc["time_window"] = df_fc["time_window"].fillna("—").replace("", "—").astype(str)
+    df_fc["anatomical_substrate"] = df_fc["anatomical_substrate"].fillna("—").astype(str)
+    df_fc["prevention_and_management"] = df_fc["prevention_and_management"].fillna("—").astype(str)
+    df_fc["reversibility_ru"] = df_fc["reversibility"].map(
+        lambda v: REVERSIBILITY_LABELS_RU.get(v, v)
+    )
+    df_fc["event_class_ru"] = df_fc["event_class"].map(
+        lambda v: EVENT_CLASS_LABELS_RU.get(v, v)
+    )
+    df_fc["evidence_pmids_str"] = df_fc["evidence_pmids"].apply(
+        lambda ps: (
+            ", ".join(
+                dict.fromkeys(
+                    str(p).strip()
+                    for p in ps
+                    if p is not None and not isinstance(p, bool) and _PMID_RE.fullmatch(str(p).strip())
+                )
+            )
+            if isinstance(ps, list)
+            else ""
+        )
+        or "—"
+    )
+    df_fc["frequency_median_num"] = pd.to_numeric(
+        df_fc["frequency_median_num"], errors="coerce"
+    ).fillna(0.0)
+
+    mod_opts = list(dict.fromkeys(df_fc["modality"].tolist()))
+    raw_grades = list(dict.fromkeys(df_fc["clavien_dindo_grade"].tolist()))
+    grade_opts = [g for g in CLAVIEN_DINDO_ORDER if g in raw_grades] + [
+        g for g in raw_grades if g not in CLAVIEN_DINDO_ORDER
+    ]
+    raw_revs = list(dict.fromkeys(df_fc["reversibility"].tolist()))
+    rev_opts = [r for r in VALID_REVERSIBILITY if r in raw_revs] + [
+        r for r in raw_revs if r not in VALID_REVERSIBILITY
+    ]
+    raw_classes = list(dict.fromkeys(df_fc["event_class"].tolist()))
+    cls_opts = [c for c in VALID_EVENT_CLASS if c in raw_classes] + [
+        c for c in raw_classes if c not in VALID_EVENT_CLASS
+    ]
+
+    f1, f2, f3, f4 = st.columns(4)
+    sel_mods = f1.multiselect(
+        "Методики лечения:",
+        options=mod_opts,
+        default=mod_opts,
+        key="t25_modalities",
+    )
+    sel_grades = f2.multiselect(
+        "Тяжесть (Clavien–Dindo):",
+        options=grade_opts,
+        default=grade_opts,
+        key="t25_grades",
+    )
+    sel_revs = f3.multiselect(
+        "Обратимость:",
+        options=rev_opts,
+        default=rev_opts,
+        format_func=lambda v: REVERSIBILITY_LABELS_RU.get(v, v),
+        key="t25_reversibility",
+    )
+    sel_classes = f4.multiselect(
+        "Класс события:",
+        options=cls_opts,
+        default=cls_opts,
+        format_func=lambda v: EVENT_CLASS_LABELS_RU.get(v, v),
+        key="t25_event_class",
+    )
+
+    df_view = df_fc[
+        df_fc["modality"].isin(sel_mods)
+        & df_fc["clavien_dindo_grade"].isin(sel_grades)
+        & df_fc["reversibility"].isin(sel_revs)
+        & df_fc["event_class"].isin(sel_classes)
+    ].copy()
+
+    if df_view.empty:
+        st.warning("Нет осложнений, соответствующих выбранным фильтрам.")
+    else:
+        color_mode = st.radio(
+            "Цветовая кодировка диаграммы частот:",
+            options=["Класс Clavien–Dindo", "Обратимость"],
+            horizontal=True,
+            key="t25_color_mode",
+        )
+        df_plot = df_view.sort_values(
+            ["frequency_median_num", "complication_name"],
+            ascending=[False, True],
+        ).copy()
+        df_plot["display_label"] = df_plot["complication_name"] + " — " + df_plot["modality"]
+
+        if color_mode == "Обратимость":
+            color_col = "reversibility_ru"
+            color_map = REVERSIBILITY_COLORS_RU
+            cat_orders = {
+                "reversibility_ru": [REVERSIBILITY_LABELS_RU[k] for k in VALID_REVERSIBILITY]
+            }
+        else:
+            color_col = "clavien_dindo_grade"
+            color_map = CLAVIEN_DINDO_COLORS
+            cat_orders = {"clavien_dindo_grade": CLAVIEN_DINDO_ORDER}
+
+        fig_freq = px.bar(
+            df_plot,
+            x="frequency_median_num",
+            y="display_label",
+            color=color_col,
+            orientation="h",
+            text="frequency_pct",
+            color_discrete_map=color_map,
+            category_orders=cat_orders,
+            hover_data={
+                "frequency_median_num": ":.2f",
+                "frequency_pct": True,
+                "time_window": True,
+                "sample_size_total": True,
+                "evidence_pmids_str": True,
+                "modality": True,
+                "clavien_dindo_grade": True,
+                "reversibility_ru": True,
+                "event_class_ru": True,
+                "display_label": False,
+            },
+            title="Медианная частота частых осложнений по методикам (%)",
+            labels={
+                "frequency_median_num": "Медианная частота (%)",
+                "display_label": "Осложнение — методика",
+                "clavien_dindo_grade": "Clavien–Dindo",
+                "reversibility_ru": "Обратимость",
+                "event_class_ru": "Класс события",
+                "frequency_pct": "Частота (диапазон)",
+                "time_window": "Окно разрешения",
+                "sample_size_total": "Выборка N",
+                "evidence_pmids_str": "PMID",
+                "modality": "Методика",
+            },
+            height=max(360, 46 * len(df_plot) + 120),
+        )
+        fig_freq.update_layout(
+            yaxis=dict(autorange="reversed"),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        )
+        st.plotly_chart(fig_freq, width="stretch")
+
+        df_stack = (
+            df_view.groupby(["modality", "clavien_dindo_grade"], as_index=False)
+            .size()
+            .rename(columns={"size": "Количество событий"})
+        )
+        fig_stack = px.bar(
+            df_stack,
+            x="modality",
+            y="Количество событий",
+            color="clavien_dindo_grade",
+            barmode="stack",
+            color_discrete_map=CLAVIEN_DINDO_COLORS,
+            category_orders={"clavien_dindo_grade": CLAVIEN_DINDO_ORDER},
+            text_auto=True,
+            title="Распределение частых осложнений по классам Clavien–Dindo (I–V) в разрезе методик",
+            labels={
+                "modality": "Методика лечения",
+                "clavien_dindo_grade": "Clavien–Dindo",
+            },
+            height=380,
+        )
+        fig_stack.update_layout(
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        )
+        st.plotly_chart(fig_stack, width="stretch")
+
+        disp_fc = df_plot[
+            [
+                "modality",
+                "complication_name",
+                "event_class_ru",
+                "clavien_dindo_grade",
+                "frequency_pct",
+                "reversibility_ru",
+                "time_window",
+                "anatomical_substrate",
+                "prevention_and_management",
+                "sample_size_total",
+                "evidence_pmids_str",
+            ]
+        ].rename(
+            columns={
+                "modality": "Методика",
+                "complication_name": "Осложнение",
+                "event_class_ru": "Класс события",
+                "clavien_dindo_grade": "Clavien–Dindo",
+                "frequency_pct": "Частота (%)",
+                "reversibility_ru": "Обратимость",
+                "time_window": "Окно разрешения",
+                "anatomical_substrate": "Анатомический субстрат",
+                "prevention_and_management": "Профилактика и лечение",
+                "sample_size_total": "Выборка N",
+                "evidence_pmids_str": "PMID",
+            }
+        )
+        st.caption(f"Отображено частых осложнений: **{len(disp_fc)}** из **{len(df_fc)}**")
+        st.dataframe(disp_fc, width="stretch", hide_index=True)
+        st.download_button(
+            "📥 Скачать профиль частых осложнений (.csv)",
+            data=dataframe_to_csv_bytes(disp_fc),
+            file_name=f"{nos_id}_frequent_complications.csv",
+            mime="text/csv",
+            key="dl_csv_freq_comp",
+        )
+
+    _render_red_flags_block(red_flags)
+
+
+def _render_subtab_clinical_nuances(kb: dict[str, Any]) -> None:
+    """Subtab 2.6: Clinical decision nuances — workhorses, gray zones & salvage niches (D-03, T-19-02)."""
+    nuances = kb.get("clinical_decision_nuances")
+    nuances_dict = nuances if isinstance(nuances, dict) else {}
+    workhorses = [
+        x for x in (nuances_dict.get("universal_workhorse_modalities") or []) if isinstance(x, dict)
+    ]
+    overlaps = [
+        x for x in (nuances_dict.get("overlapping_indications_and_gray_zones") or []) if isinstance(x, dict)
+    ]
+    niches = [
+        x for x in (nuances_dict.get("strict_niche_or_salvage_indications") or []) if isinstance(x, dict)
+    ]
+
+    if not workhorses and not overlaps and not niches:
+        st.info(
+            "Данная нозология собрана по архивной схеме **v1.x** и не содержит структурированного раздела "
+            "`clinical_decision_nuances` (сквозные методики, перекрывающиеся показания и «серые зоны»). "
+            "Для сопоставления методик перейдите в подвкладку **«2.4. Бок-о-бок сравнение методик + Доказательства SQLite»**."
+        )
+        return
+
+    if workhorses:
+        st.markdown("#### 🛠️ Сквозные методики («рабочие лошадки»)")
+        for wh in workhorses:
+            with st.container(border=True):
+                st.markdown(f"##### {wh.get('modality', '—')}")
+                st.markdown(f"**Покрываемый спектр стадий:** {wh.get('applicable_spectrum', '—')}")
+                col_l, col_r = st.columns(2)
+                col_l.markdown(f"**Практические нюансы:**\n\n{wh.get('practical_nuances', '—')}")
+                col_r.markdown(
+                    f"**Факторы опыта хирурга и оснащения:**\n\n{wh.get('surgeon_and_equipment_factors', '—')}\n\n"
+                    f"**Компромиссы для пациента:**\n\n{wh.get('patient_tradeoffs', '—')}"
+                )
+                st.caption(f"Доказательная база: {_format_pmid_links_md(wh.get('evidence_pmids'))}")
+
+    if overlaps:
+        if workhorses:
+            st.divider()
+        st.markdown("#### ⚖️ Перекрывающиеся показания и «серые зоны»")
+        for ov in overlaps:
+            comp_mods = ov.get("competing_modalities")
+            if isinstance(comp_mods, list):
+                comp_str = " vs ".join(str(m).strip() for m in comp_mods if str(m).strip()) or "—"
+            else:
+                comp_str = str(comp_mods or "—")
+            with st.container(border=True):
+                st.markdown(f"##### {ov.get('clinical_scenario', '—')}")
+                st.markdown(f"**Конкурирующие методики:** {comp_str}")
+                st.warning(f"**Почему нет одного «победителя»:** {ov.get('why_no_single_winner', '—')}")
+                st.markdown(f"**Решающие практические факторы:** {ov.get('decisive_practical_factors', '—')}")
+                st.caption(f"Доказательная база: {_format_pmid_links_md(ov.get('evidence_pmids'))}")
+
+    if niches:
+        if workhorses or overlaps:
+            st.divider()
+        st.markdown("#### 🎯 Узконишевые показания и методики спасения")
+        for ni in niches:
+            with st.container(border=True):
+                st.markdown(f"##### {ni.get('modality', '—')}")
+                c_l, c_r = st.columns(2)
+                c_l.markdown(
+                    f"**Узкая ниша / роль спасения:**\n\n{ni.get('narrow_indication_or_salvage_role', '—')}"
+                )
+                c_r.markdown(
+                    f"**Почему не первая линия для всех:**\n\n{ni.get('why_not_first_line_for_all', '—')}"
+                )
+                st.caption(f"Доказательная база: {_format_pmid_links_md(ni.get('evidence_pmids'))}")
+
+
 def render_tab_clinical_matrix(bundle: dict[str, Any]) -> None:
-    """Tab 2: Universal Clinical Matrix (Stages, Etiology/Pathogenesis, Natural History vs Modalities, Comparator)."""
+    """Tab 2: Universal Clinical Matrix (Stages, Etiology/Pathogenesis, Modalities, Comparator, Complications, Nuances)."""
     kb = bundle["kb_index"]
     nos_id = bundle["nosology_id"]
     db_path_str = str(bundle["db_path"])
 
     st.subheader("📊 Унифицированная клиническая аналитика нозологии")
-    sub1, sub2, sub3, sub4 = st.tabs(
+    sub1, sub2, sub3, sub4, sub5, sub6 = st.tabs(
         [
             "📐 2.1. Стадии тяжести и Локализации/Подтипы",
             "🧬 2.2. Этиология, Факторы риска и Фазы патогенеза",
             "📈 2.3. Естественное течение vs Методики (Ремиссия / Рецидив / Процедив)",
             "⚖️ 2.4. Бок-о-бок сравнение методик + Доказательства SQLite",
+            "⚠️ 2.5. Осложнения (Clavien–Dindo)",
+            "🧭 2.6. Клинические компромиссы и серые зоны",
         ]
     )
 
@@ -394,7 +835,7 @@ def render_tab_clinical_matrix(bundle: dict[str, Any]) -> None:
                 height=380,
                 legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
             )
-            st.plotly_chart(fig_stg, use_container_width=True)
+            st.plotly_chart(fig_stg, width="stretch")
 
             disp_stages = df_stages[
                 [
@@ -415,7 +856,7 @@ def render_tab_clinical_matrix(bundle: dict[str, Any]) -> None:
                     "clinical_description": "Клинико-анатомическая характеристика",
                 }
             )
-            st.dataframe(disp_stages, use_container_width=True, hide_index=True)
+            st.dataframe(disp_stages, width="stretch", hide_index=True)
 
         st.divider()
         anat = kb.get("anatomical_or_subtype_distribution", {})
@@ -439,7 +880,7 @@ def render_tab_clinical_matrix(bundle: dict[str, Any]) -> None:
                 height=380,
             )
             fig_sub.update_layout(yaxis=dict(autorange="reversed"))
-            st.plotly_chart(fig_sub, use_container_width=True)
+            st.plotly_chart(fig_sub, width="stretch")
 
             disp_sub = df_sub[
                 ["rank", "category", "locus_or_subtype", "share_pct", "prognostic_impact"]
@@ -452,7 +893,7 @@ def render_tab_clinical_matrix(bundle: dict[str, Any]) -> None:
                     "prognostic_impact": "Прогностическое значение и влияние на выбор методики",
                 }
             )
-            st.dataframe(disp_sub, use_container_width=True, hide_index=True)
+            st.dataframe(disp_sub, width="stretch", hide_index=True)
 
     with sub2:
         st.markdown("#### 🧬 Этиологические факторы риска и протективные модификаторы")
@@ -468,7 +909,7 @@ def render_tab_clinical_matrix(bundle: dict[str, Any]) -> None:
                     "mechanism": "Патогенетический механизм",
                 }
             )
-            st.dataframe(df_fac, use_container_width=True, hide_index=True)
+            st.dataframe(df_fac, width="stretch", hide_index=True)
             st.download_button(
                 "📥 Скачать таблицу этиологических факторов (.csv)",
                 data=dataframe_to_csv_bytes(df_fac),
@@ -558,7 +999,7 @@ def render_tab_clinical_matrix(bundle: dict[str, Any]) -> None:
                 height=500,
                 legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
             )
-            st.plotly_chart(fig_5y, use_container_width=True)
+            st.plotly_chart(fig_5y, width="stretch")
 
             traj_rows = []
             for _, r in df_filt.iterrows():
@@ -582,7 +1023,7 @@ def render_tab_clinical_matrix(bundle: dict[str, Any]) -> None:
                     title="Кривые накопления истинного рецидива / прогрессирования от 1–2 до 10 лет",
                     height=440,
                 )
-                st.plotly_chart(fig_traj, use_container_width=True)
+                st.plotly_chart(fig_traj, width="stretch")
 
             disp_mod = df_filt[
                 [
@@ -621,7 +1062,7 @@ def render_tab_clinical_matrix(bundle: dict[str, Any]) -> None:
                     "cons": "Минусы (ограничения и риски)",
                 }
             )
-            st.dataframe(disp_mod, use_container_width=True, hide_index=True)
+            st.dataframe(disp_mod, width="stretch", hide_index=True)
             st.download_button(
                 "📥 Скачать полную сравнительную матрицу методик (.csv)",
                 data=dataframe_to_csv_bytes(disp_mod),
@@ -697,9 +1138,15 @@ def render_tab_clinical_matrix(bundle: dict[str, Any]) -> None:
                         "key_conclusion",
                     ]
                 ],
-                use_container_width=True,
+                width="stretch",
                 hide_index=True,
             )
+
+    with sub5:
+        _render_subtab_complications(kb, nos_id)
+
+    with sub6:
+        _render_subtab_clinical_nuances(kb)
 
 
 def render_tab_prisma_explorer(bundle: dict[str, Any]) -> None:
@@ -736,7 +1183,7 @@ def render_tab_prisma_explorer(bundle: dict[str, Any]) -> None:
                 labels={"pub_year": "Год публикации"},
                 height=320,
             )
-            st.plotly_chart(fig_yr, use_container_width=True)
+            st.plotly_chart(fig_yr, width="stretch")
         with ch2:
             tier_map = {
                 1: "Tier 1 — Систематические обзоры и мета-анализы",
@@ -754,7 +1201,7 @@ def render_tab_prisma_explorer(bundle: dict[str, Any]) -> None:
                 title="Распределение статей по уровням доказательности (Tier 1–4)",
                 height=320,
             )
-            st.plotly_chart(fig_tr, use_container_width=True)
+            st.plotly_chart(fig_tr, width="stretch")
 
     table_choice = st.radio(
         "Выберите таблицу базы данных SQLite для интерактивного поиска и выгрузки:",
@@ -809,7 +1256,7 @@ def render_tab_prisma_explorer(bundle: dict[str, Any]) -> None:
         ]
         st.dataframe(
             view[disp_cols],
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
             column_config={
                 "pubmed_url": st.column_config.LinkColumn("PubMed", display_text="Открыть PubMed"),
@@ -843,7 +1290,7 @@ def render_tab_prisma_explorer(bundle: dict[str, Any]) -> None:
                 | view["pmid"].fillna("").astype(str).str.contains(q, regex=False)
             ]
         st.caption(f"Найдено клинических записей: **{len(view)}** из **{len(df_clin)}**")
-        st.dataframe(view, use_container_width=True, hide_index=True)
+        st.dataframe(view, width="stretch", hide_index=True)
         st.download_button(
             "📥 Скачать клинические доказательства (.csv)",
             data=dataframe_to_csv_bytes(view),
@@ -871,7 +1318,7 @@ def render_tab_prisma_explorer(bundle: dict[str, Any]) -> None:
                 | view["pmid"].fillna("").astype(str).str.contains(q, regex=False)
             ]
         st.caption(f"Найдено патогенетических записей: **{len(view)}** из **{len(df_mech)}**")
-        st.dataframe(view, use_container_width=True, hide_index=True)
+        st.dataframe(view, width="stretch", hide_index=True)
         st.download_button(
             "📥 Скачать патогенетические механизмы (.csv)",
             data=dataframe_to_csv_bytes(view),
@@ -901,7 +1348,7 @@ def render_tab_prisma_explorer(bundle: dict[str, Any]) -> None:
         st.caption(f"Найдено протоколов ClinicalTrials.gov: **{len(view)}** из **{len(df_trials)}**")
         st.dataframe(
             view,
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
             column_config={
                 "ctgov_url": st.column_config.LinkColumn("ClinicalTrials.gov", display_text="Открыть NCT"),
