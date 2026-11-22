@@ -9,15 +9,60 @@ dependencies.
 from __future__ import annotations
 
 import io
+import json
 import re
+import sys
 import zipfile
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from xml.sax.saxutils import escape
 import xml.etree.ElementTree as ET
 
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from src.extractor_common import validate_nosology_id
+
 W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 R_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+
+FROZEN_V1_NOSOLOGIES = frozenset({"prom", "metroplasty_pregnancy", "trigger_finger"})
+
+# Academic OpenXML table palette (WCAG AA+ dark text on soft pastel fills)
+FILL_HEADER = "1E3A8A"
+FILL_ZEBRA_EVEN = "F8FAFC"
+FILL_ZEBRA_ODD = "FFFFFF"
+FILL_CRITICAL_RED = "FEE2E2"
+FILL_CRITICAL_BADGE = "FECACA"
+COLOR_CRITICAL_TEXT = "7F1D1D"
+FILL_SEVERE_AMBER = "FFEDD5"
+FILL_SEVERE_BADGE = "FED7AA"
+COLOR_SEVERE_TEXT = "9A3412"
+
+_EVENT_CLASS_RU: Dict[str, str] = {
+    "true_complication": "Истинное осложнение",
+    "transient_postop_sequela": "Транзиторное послеоперационное явление",
+}
+
+_REVERSIBILITY_RU: Dict[str, str] = {
+    "transient_self_limiting": "Транзиторное (самокупирующееся)",
+    "requires_conservative_therapy": "Требует консервативной терапии",
+    "requires_reoperation": "Требует повторной операции / ревизии",
+    "permanent_deficit": "Стойкий дефицит",
+}
+
+_PMID_RE = re.compile(r"^[1-9]\d{0,8}$")
+_RED_FLAG_HEADING_RE = re.compile(
+    r"красные\s+флаги|red\s+flags|критические\s+осложнения",
+    re.IGNORECASE,
+)
+_CD_COL_HDR_RE = re.compile(r"clavien|клавьен", re.IGNORECASE)
+_CD_CRITICAL_CELL_RE = re.compile(r"(?:^|[\s(/–—-])(IV[ab]?|V)(?:$|[\s)/,;–—-])")
+_CD_SEVERE_CELL_RE = re.compile(r"(?:^|[\s(/–—-])(IIIb)(?:$|[\s)/,;–—-])")
+_CD_INLINE_CONTEXT_RE = re.compile(
+    r"Clavien[–—\-\s]*Dindo\s*(?:Grade\s*)?(IIIb|IV[ab]?|V)\b"
+)
 
 
 def _xml_escape(text: str) -> str:
@@ -314,13 +359,23 @@ def _render_inline_runs(
     return "".join(out)
 
 
+def _escape_md_cell(value: Any) -> str:
+    """Safely normalize an arbitrary value for inclusion inside a Markdown pipe table cell (T-19-02)."""
+    if value is None:
+        return "—"
+    cleaned = " ".join(str(value).replace("\r\n", " ").replace("\r", " ").replace("\n", " ").split())
+    if not cleaned:
+        return "—"
+    return cleaned.replace("|", r"\|")
+
+
 def _split_table_row(line: str) -> List[str]:
     stripped = line.strip()
     if stripped.startswith("|"):
         stripped = stripped[1:]
-    if stripped.endswith("|"):
+    if stripped.endswith("|") and not stripped.endswith(r"\|"):
         stripped = stripped[:-1]
-    return [c.strip() for c in stripped.split("|")]
+    return [c.replace(r"\|", "|").strip() for c in re.split(r"(?<!\\)\|", stripped)]
 
 
 def _is_table_separator(line: str) -> bool:
@@ -330,12 +385,49 @@ def _is_table_separator(line: str) -> bool:
     return all(bool(re.match(r"^:?-{2,}:?$", c)) for c in cells)
 
 
-def _render_table_xml(table_lines: List[str], rels: _RelRegistry) -> str:
+def _classify_row_severity(
+    padded_row: List[str],
+    cd_col_idx: Optional[int],
+    is_red_flag_table: bool,
+) -> Optional[str]:
+    """Return 'critical' (Red Flag / Clavien-Dindo IV-V), 'severe' (IIIb), or None without stage false positives."""
+    if is_red_flag_table:
+        return "critical"
+    if cd_col_idx is not None and cd_col_idx < len(padded_row):
+        clean = re.sub(r"[*_`]", "", padded_row[cd_col_idx]).strip()
+        if _CD_CRITICAL_CELL_RE.search(clean):
+            return "critical"
+        if _CD_SEVERE_CELL_RE.search(clean):
+            return "severe"
+        return None
+    detected: Optional[str] = None
+    for cell in padded_row:
+        clean = re.sub(r"[*_`]", "", cell).strip()
+        for m in _CD_INLINE_CONTEXT_RE.finditer(clean):
+            if m.group(1) == "IIIb":
+                detected = detected or "severe"
+            else:
+                return "critical"
+    return detected
+
+
+def _render_table_xml(
+    table_lines: List[str],
+    rels: _RelRegistry,
+    *,
+    is_red_flag_table: bool = False,
+) -> str:
     rows_raw = [_split_table_row(ln) for ln in table_lines if not _is_table_separator(ln)]
     if not rows_raw:
         return ""
     num_cols = max(len(r) for r in rows_raw)
     col_pct = max(100, int(5000 / max(num_cols, 1)))
+
+    cd_col_idx: Optional[int] = None
+    for idx, hdr in enumerate(rows_raw[0]):
+        if _CD_COL_HDR_RE.search(hdr):
+            cd_col_idx = idx
+            break
 
     xml_parts = [
         "<w:tbl>",
@@ -360,23 +452,61 @@ def _render_table_xml(table_lines: List[str], rels: _RelRegistry) -> str:
 
     for r_idx, row in enumerate(rows_raw):
         is_header = r_idx == 0
-        fill = "1E3A8A" if is_header else ("F8FAFC" if r_idx % 2 == 0 else "FFFFFF")
-        tr_pr = "<w:trPr><w:tblHeader/></w:trPr>" if is_header else ""
+        # Strict ECMA-376 CT_TrPrBase child order: <w:cantSplit/> BEFORE <w:tblHeader/>
+        tr_pr = (
+            "<w:trPr><w:cantSplit/><w:tblHeader/></w:trPr>"
+            if is_header
+            else "<w:trPr><w:cantSplit/></w:trPr>"
+        )
         xml_parts.append(f"  <w:tr>{tr_pr}")
 
         padded_row = row + [""] * (num_cols - len(row))
-        for cell_text in padded_row:
+        severity = (
+            None
+            if is_header
+            else _classify_row_severity(padded_row, cd_col_idx, is_red_flag_table)
+        )
+
+        for c_idx, cell_text in enumerate(padded_row):
+            if is_header:
+                cell_fill = FILL_HEADER
+                cell_color: Optional[str] = "FFFFFF"
+                cell_bold = True
+            elif severity == "critical":
+                if c_idx == cd_col_idx or (is_red_flag_table and c_idx == 0):
+                    cell_fill = FILL_CRITICAL_BADGE
+                    cell_color = COLOR_CRITICAL_TEXT
+                    cell_bold = True
+                else:
+                    cell_fill = FILL_CRITICAL_RED
+                    cell_color = COLOR_CRITICAL_TEXT if is_red_flag_table else None
+                    cell_bold = False
+            elif severity == "severe":
+                if c_idx == cd_col_idx:
+                    cell_fill = FILL_SEVERE_BADGE
+                    cell_color = COLOR_SEVERE_TEXT
+                    cell_bold = True
+                else:
+                    cell_fill = FILL_SEVERE_AMBER
+                    cell_color = None
+                    cell_bold = False
+            else:
+                cell_fill = FILL_ZEBRA_EVEN if r_idx % 2 == 0 else FILL_ZEBRA_ODD
+                cell_color = None
+                cell_bold = False
+
             runs = _render_inline_runs(
                 cell_text,
                 rels=rels,
-                force_bold=is_header,
-                force_color="FFFFFF" if is_header else None,
+                force_bold=cell_bold,
+                force_color=cell_color,
                 size_half_pt=20,
             )
+            # Strict ECMA-376 CT_TcPrInner child order: <w:tcW> -> single <w:shd> -> <w:vAlign>
             xml_parts.append(
                 "    <w:tc>"
                 f'<w:tcPr><w:tcW w:w="{col_pct}" w:type="pct"/>'
-                f'<w:shd w:val="clear" w:color="auto" w:fill="{fill}"/>'
+                f'<w:shd w:val="clear" w:color="auto" w:fill="{cell_fill}"/>'
                 '<w:vAlign w:val="center"/></w:tcPr>'
                 f'<w:p><w:pPr><w:spacing w:before="40" w:after="40" w:line="240" w:lineRule="auto"/>'
                 f'<w:jc w:val="left"/></w:pPr>{runs}</w:p>'
@@ -417,6 +547,7 @@ def _render_code_block_xml(code_lines: List[str]) -> str:
 def _markdown_to_body_xml(md_text: str, rels: _RelRegistry) -> List[str]:
     lines = md_text.replace("\r\n", "\n").split("\n")
     body_elements: List[str] = []
+    last_heading = ""
     i = 0
     n = len(lines)
 
@@ -431,6 +562,7 @@ def _markdown_to_body_xml(md_text: str, rels: _RelRegistry) -> List[str]:
 
         # Horizontal rule
         if re.match(r"^-{3,}$|^\*{3,}$", stripped):
+            last_heading = ""
             body_elements.append(
                 "<w:p><w:pPr><w:pBdr>"
                 '<w:bottom w:val="single" w:sz="6" w:space="1" w:color="CBD5E1"/>'
@@ -457,7 +589,13 @@ def _markdown_to_body_xml(md_text: str, rels: _RelRegistry) -> List[str]:
             while i < n and lines[i].strip().startswith("|"):
                 table_lines.append(lines[i])
                 i += 1
-            body_elements.append(_render_table_xml(table_lines, rels))
+            body_elements.append(
+                _render_table_xml(
+                    table_lines,
+                    rels,
+                    is_red_flag_table=bool(_RED_FLAG_HEADING_RE.search(last_heading)),
+                )
+            )
             continue
 
         # Headings (# .. ####)
@@ -465,6 +603,10 @@ def _markdown_to_body_xml(md_text: str, rels: _RelRegistry) -> List[str]:
         if m_head:
             level = min(len(m_head.group(1)), 4)
             title_txt = m_head.group(2).strip()
+            if level <= 2 and not _RED_FLAG_HEADING_RE.search(title_txt):
+                last_heading = ""
+            else:
+                last_heading = title_txt
             runs = _render_inline_runs(title_txt, rels=rels)
             body_elements.append(
                 f'<w:p><w:pPr><w:pStyle w:val="Heading{level}"/></w:pPr>{runs}</w:p>'
@@ -576,14 +718,286 @@ def build_docx_bytes_from_markdown(md_text: str) -> bytes:
     return build_docx_bytes_from_markdown_sections([md_text])
 
 
-def export_nosology_docx_files(nosology_slug: str, base_dir: Optional[Path] = None) -> Dict[str, Path]:
+def is_v2_kb_index(kb_index: Optional[Dict[str, Any]]) -> bool:
+    """Return True only when kb_index carries schema_version '2.0' or non-empty v2.0 sections."""
+    if not isinstance(kb_index, dict):
+        return False
+    if str(kb_index.get("schema_version", "")) == "2.0":
+        return True
+    if kb_index.get("frequent_complications") or kb_index.get("rare_critical_red_flags"):
+        return True
+    nuances = kb_index.get("clinical_decision_nuances")
+    if isinstance(nuances, dict):
+        return any(
+            bool(nuances.get(sec))
+            for sec in (
+                "universal_workhorse_modalities",
+                "overlapping_indications_and_gray_zones",
+                "strict_niche_or_salvage_indications",
+            )
+        )
+    return False
+
+
+def _format_pmid_links(pmids: Any) -> str:
+    """Validate PMIDs strictly against ^[1-9]\\d{0,8}$ and render clickable PubMed Markdown links (T-19-02)."""
+    if not isinstance(pmids, list):
+        return "—"
+    links: List[str] = []
+    seen: set[str] = set()
+    for raw in pmids:
+        if raw is None or isinstance(raw, bool):
+            continue
+        pid = str(raw).strip()
+        if pid and _PMID_RE.fullmatch(pid) and pid not in seen:
+            seen.add(pid)
+            links.append(f"[PMID {pid}](https://pubmed.ncbi.nlm.nih.gov/{pid}/)")
+    return ", ".join(links) if links else "—"
+
+
+def render_v2_kb_appendices_markdown(kb_index: Optional[Dict[str, Any]]) -> str:
+    """Render structured v2.0 complications, red flags, and clinical decision nuances Markdown appendices (D-06)."""
+    if not is_v2_kb_index(kb_index):
+        return ""
+    assert isinstance(kb_index, dict)
+
+    freq_comps = [x for x in (kb_index.get("frequent_complications") or []) if isinstance(x, dict)]
+    red_flags = [x for x in (kb_index.get("rare_critical_red_flags") or []) if isinstance(x, dict)]
+    nuances = kb_index.get("clinical_decision_nuances")
+    nuances_dict = nuances if isinstance(nuances, dict) else {}
+    workhorses = [
+        x for x in (nuances_dict.get("universal_workhorse_modalities") or []) if isinstance(x, dict)
+    ]
+    overlaps = [
+        x for x in (nuances_dict.get("overlapping_indications_and_gray_zones") or []) if isinstance(x, dict)
+    ]
+    niches = [
+        x for x in (nuances_dict.get("strict_niche_or_salvage_indications") or []) if isinstance(x, dict)
+    ]
+
+    if not any((freq_comps, red_flags, workhorses, overlaps, niches)):
+        return ""
+
+    parts: List[str] = []
+
+    # Appendix A: Frequent complications & Red Flags
+    if freq_comps or red_flags:
+        parts.append("## Приложение А. Профиль частых осложнений лечения (Clavien–Dindo)")
+        parts.append("")
+        if freq_comps:
+            parts.append(
+                "| Методика | Осложнение | Класс события | Clavien–Dindo | Частота (%) | "
+                "Обратимость и сроки | Анатомический субстрат | Профилактика и лечение | Выборка N | PMID |"
+            )
+            parts.append("| :--- | :--- | :--- | :---: | :---: | :--- | :--- | :--- | :---: | :--- |")
+            for entry in freq_comps:
+                mod_cell = _escape_md_cell(entry.get("modality"))
+                comp_cell = _escape_md_cell(entry.get("complication_name"))
+                raw_cls = str(entry.get("event_class") or "").strip()
+                cls_cell = _escape_md_cell(_EVENT_CLASS_RU.get(raw_cls, raw_cls or None))
+                cd_cell = _escape_md_cell(entry.get("clavien_dindo_grade"))
+
+                freq_pct_str = str(entry.get("frequency_pct") or "").strip()
+                med_val = entry.get("frequency_median_num")
+                if freq_pct_str:
+                    if (
+                        med_val is not None
+                        and not isinstance(med_val, bool)
+                        and isinstance(med_val, (int, float))
+                    ):
+                        med_str = f"{float(med_val):g}%"
+                        freq_display = (
+                            f"{freq_pct_str} (мед. {med_str})"
+                            if med_str not in freq_pct_str
+                            else freq_pct_str
+                        )
+                    else:
+                        freq_display = freq_pct_str
+                elif (
+                    med_val is not None
+                    and not isinstance(med_val, bool)
+                    and isinstance(med_val, (int, float))
+                ):
+                    freq_display = f"{float(med_val):g}%"
+                else:
+                    freq_display = "—"
+                freq_cell = _escape_md_cell(freq_display)
+
+                rev_raw = str(entry.get("reversibility") or "").strip()
+                rev_label = _REVERSIBILITY_RU.get(rev_raw, rev_raw) if rev_raw else ""
+                tw_str = str(entry.get("time_window") or "").strip()
+                if rev_label and tw_str:
+                    rev_tw_display = f"{rev_label}; сроки: {tw_str}"
+                else:
+                    rev_tw_display = rev_label or tw_str or "—"
+                rev_cell = _escape_md_cell(rev_tw_display)
+
+                anat_cell = _escape_md_cell(entry.get("anatomical_substrate"))
+                prev_cell = _escape_md_cell(entry.get("prevention_and_management"))
+                n_val = entry.get("sample_size_total")
+                n_cell = (
+                    _escape_md_cell(str(int(n_val)))
+                    if n_val is not None and not isinstance(n_val, bool) and isinstance(n_val, (int, float))
+                    else "—"
+                )
+                pmid_cell = _format_pmid_links(entry.get("evidence_pmids"))
+                parts.append(
+                    f"| {mod_cell} | {comp_cell} | {cls_cell} | {cd_cell} | {freq_cell} | "
+                    f"{rev_cell} | {anat_cell} | {prev_cell} | {n_cell} | {pmid_cell} |"
+                )
+            parts.append("")
+
+        if red_flags:
+            parts.append("### Красные флаги: редкие критические осложнения (<1%)")
+            parts.append("")
+            parts.append(
+                "> **Клиническое предупреждение:** приведённые ниже осложнения встречаются редко "
+                "(<1% наблюдений или единичные критические случаи), однако ассоциированы с тяжестью "
+                "Clavien–Dindo III–V, необходимостью экстренной ревизии или риском стойкого дефицита."
+            )
+            parts.append("")
+            parts.append(
+                "| Методика | Осложнение | Clavien–Dindo | Частота (<1%) | Обратимость | "
+                "Анатомический субстрат | Профилактика и экстренная тактика | PMID |"
+            )
+            parts.append("| :--- | :--- | :---: | :---: | :--- | :--- | :--- | :--- |")
+            for entry in red_flags:
+                mod_cell = _escape_md_cell(entry.get("modality"))
+                comp_cell = _escape_md_cell(entry.get("complication_name"))
+                cd_cell = _escape_md_cell(entry.get("clavien_dindo_grade"))
+                freq_raw = str(entry.get("frequency_pct") or "").strip()
+                if not freq_raw:
+                    max_num = entry.get("frequency_max_num")
+                    if max_num is not None and not isinstance(max_num, bool) and isinstance(max_num, (int, float)):
+                        freq_raw = f"<{float(max_num):g}%"
+                freq_cell = _escape_md_cell(freq_raw or None)
+                rev_raw = str(entry.get("reversibility") or "").strip()
+                rev_cell = _escape_md_cell(_REVERSIBILITY_RU.get(rev_raw, rev_raw or None))
+                anat_cell = _escape_md_cell(entry.get("anatomical_substrate"))
+                prev_cell = _escape_md_cell(entry.get("prevention_and_management"))
+                pmid_cell = _format_pmid_links(entry.get("evidence_pmids"))
+                parts.append(
+                    f"| {mod_cell} | {comp_cell} | {cd_cell} | {freq_cell} | {rev_cell} | "
+                    f"{anat_cell} | {prev_cell} | {pmid_cell} |"
+                )
+            parts.append("")
+
+    # Appendix B: Clinical decision nuances
+    if workhorses or overlaps or niches:
+        parts.append("## Приложение Б. Клинические компромиссы и матрица выбора методики (v2.0)")
+        parts.append("")
+
+        if workhorses:
+            parts.append("### Сквозные методики («рабочие лошадки»)")
+            parts.append("")
+            parts.append(
+                "| Методика | Покрываемый спектр стадий | Практические нюансы | "
+                "Факторы опыта хирурга и оснащения | Компромиссы для пациента | PMID |"
+            )
+            parts.append("| :--- | :--- | :--- | :--- | :--- | :--- |")
+            for entry in workhorses:
+                parts.append(
+                    f"| {_escape_md_cell(entry.get('modality'))} "
+                    f"| {_escape_md_cell(entry.get('applicable_spectrum'))} "
+                    f"| {_escape_md_cell(entry.get('practical_nuances'))} "
+                    f"| {_escape_md_cell(entry.get('surgeon_and_equipment_factors'))} "
+                    f"| {_escape_md_cell(entry.get('patient_tradeoffs'))} "
+                    f"| {_format_pmid_links(entry.get('evidence_pmids'))} |"
+                )
+            parts.append("")
+
+        if overlaps:
+            parts.append("### Перекрывающиеся показания и «серые зоны»")
+            parts.append("")
+            parts.append(
+                "| Клинический сценарий | Конкурирующие методики | Почему нет одного «победителя» | "
+                "Решающие практические факторы | PMID |"
+            )
+            parts.append("| :--- | :--- | :--- | :--- | :--- |")
+            for entry in overlaps:
+                comp_mods = entry.get("competing_modalities")
+                if isinstance(comp_mods, list):
+                    comp_mods_str = ", ".join(str(m).strip() for m in comp_mods if str(m).strip())
+                else:
+                    comp_mods_str = str(comp_mods or "").strip()
+                parts.append(
+                    f"| {_escape_md_cell(entry.get('clinical_scenario'))} "
+                    f"| {_escape_md_cell(comp_mods_str or None)} "
+                    f"| {_escape_md_cell(entry.get('why_no_single_winner'))} "
+                    f"| {_escape_md_cell(entry.get('decisive_practical_factors'))} "
+                    f"| {_format_pmid_links(entry.get('evidence_pmids'))} |"
+                )
+            parts.append("")
+
+        if niches:
+            parts.append("### Узконишевые показания и методики спасения")
+            parts.append("")
+            parts.append(
+                "| Методика | Узкая ниша / роль спасения | Почему не первая линия для всех | PMID |"
+            )
+            parts.append("| :--- | :--- | :--- | :--- |")
+            for entry in niches:
+                parts.append(
+                    f"| {_escape_md_cell(entry.get('modality'))} "
+                    f"| {_escape_md_cell(entry.get('narrow_indication_or_salvage_role'))} "
+                    f"| {_escape_md_cell(entry.get('why_not_first_line_for_all'))} "
+                    f"| {_format_pmid_links(entry.get('evidence_pmids'))} |"
+                )
+            parts.append("")
+
+    return "\n".join(parts).strip()
+
+
+def build_executive_docx_bytes(
+    exec_md: str,
+    kb_index: Optional[Dict[str, Any]] = None,
+) -> bytes:
+    """Build executive_summary.docx bytes; appends v2.0 structured appendices for v2.0 KB only (D-06)."""
+    appendix_md = render_v2_kb_appendices_markdown(kb_index)
+    if appendix_md:
+        return build_docx_bytes_from_markdown_sections([exec_md, appendix_md])
+    return build_docx_bytes_from_markdown(exec_md)
+
+
+def build_full_dossier_docx_bytes(
+    exec_md: str,
+    diss_md: str,
+    kb_modules_md: List[str],
+    kb_index: Optional[Dict[str, Any]] = None,
+) -> bytes:
+    """Build full_clinical_dossier.docx bytes; appends v2.0 structured appendices for v2.0 KB only (D-06)."""
+    sections: List[str] = [exec_md, diss_md]
+    sections.extend(m for m in kb_modules_md if m)
+    appendix_md = render_v2_kb_appendices_markdown(kb_index)
+    if appendix_md:
+        sections.append(appendix_md)
+    return build_docx_bytes_from_markdown_sections(sections)
+
+
+def export_nosology_docx_files(
+    nosology_slug: str,
+    base_dir: Optional[Path] = None,
+    *,
+    allow_frozen_overwrite: bool = False,
+) -> Dict[str, Path]:
     """Generate .docx reports for a given nosology in reports/<nosology>/:
-      1. dissertation_report.docx (Диссертационная монография)
-      2. executive_summary.docx (Краткое клиническое руководство)
-      3. full_clinical_dossier.docx (Полное клиническое досье: Краткое руководство + Диссертация + 5 модулей БЗ)
+      1. dissertation_report.docx (Диссертационная монография — чистый рендер dissertation_report.md)
+      2. executive_summary.docx (Краткое клиническое руководство + приложения v2.0 для schema 2.0)
+      3. full_clinical_dossier.docx (Полное клиническое досье: Краткое руководство + Диссертация + модули БЗ + приложения v2.0)
     """
-    root = base_dir or Path(__file__).resolve().parent.parent
-    rep_dir = root / "reports" / nosology_slug
+    nos_id = validate_nosology_id(nosology_slug)
+    root = (base_dir or PROJECT_ROOT).resolve()
+    reports_root = (root / "reports").resolve()
+    rep_dir = (reports_root / nos_id).resolve()
+    if not rep_dir.is_relative_to(reports_root):
+        raise ValueError(f"Reports directory escapes reports root: {rep_dir}")
+
+    if root == PROJECT_ROOT.resolve() and nos_id in FROZEN_V1_NOSOLOGIES and not allow_frozen_overwrite:
+        raise PermissionError(
+            f"Замороженная нозология v1.x '{nos_id}' защищена от перезаписи в корневом репозитории ({rep_dir}). "
+            "Для явной перезаписи укажите allow_frozen_overwrite=True или CLI-флаг --allow-frozen-overwrite."
+        )
+
     if not rep_dir.exists():
         raise FileNotFoundError(f"Reports directory not found: {rep_dir}")
 
@@ -594,18 +1008,27 @@ def export_nosology_docx_files(nosology_slug: str, base_dir: Optional[Path] = No
     diss_text = diss_md_path.read_text(encoding="utf-8")
     exec_text = exec_md_path.read_text(encoding="utf-8")
 
+    kb_index: Optional[Dict[str, Any]] = None
+    kb_json_path = kb_dir / "kb_index.json"
+    if kb_json_path.exists():
+        loaded_kb = json.loads(kb_json_path.read_text(encoding="utf-8"))
+        if isinstance(loaded_kb, dict):
+            kb_index = loaded_kb
+
+    kb_module_texts: List[str] = []
+    if kb_dir.exists():
+        for md_file in sorted(kb_dir.glob("*.md")):
+            kb_module_texts.append(md_file.read_text(encoding="utf-8"))
+
     diss_docx_path = rep_dir / "dissertation_report.docx"
     exec_docx_path = rep_dir / "executive_summary.docx"
     full_docx_path = rep_dir / "full_clinical_dossier.docx"
 
     diss_docx_path.write_bytes(build_docx_bytes_from_markdown(diss_text))
-    exec_docx_path.write_bytes(build_docx_bytes_from_markdown(exec_text))
-
-    kb_sections: List[str] = [exec_text, diss_text]
-    if kb_dir.exists():
-        for md_file in sorted(kb_dir.glob("*.md")):
-            kb_sections.append(md_file.read_text(encoding="utf-8"))
-    full_docx_path.write_bytes(build_docx_bytes_from_markdown_sections(kb_sections))
+    exec_docx_path.write_bytes(build_executive_docx_bytes(exec_text, kb_index))
+    full_docx_path.write_bytes(
+        build_full_dossier_docx_bytes(exec_text, diss_text, kb_module_texts, kb_index)
+    )
 
     return {
         "dissertation_docx": diss_docx_path,
@@ -619,6 +1042,11 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="Export Markdown medical reports to .docx")
     parser.add_argument("--nosology", type=str, default="all", help="Nosology slug or 'all'")
+    parser.add_argument(
+        "--allow-frozen-overwrite",
+        action="store_true",
+        help="Explicitly allow overwriting frozen v1.x nosology .docx files in repository root",
+    )
     args = parser.parse_args()
 
     root_dir = Path(__file__).resolve().parent.parent
@@ -630,7 +1058,17 @@ if __name__ == "__main__":
     )
 
     for slug in slugs:
-        paths = export_nosology_docx_files(slug, root_dir)
+        if args.nosology == "all" and slug in FROZEN_V1_NOSOLOGIES and not args.allow_frozen_overwrite:
+            print(
+                f"[DOCX Exporter: {slug}] Skipped frozen v1.x nosology "
+                "(pass --allow-frozen-overwrite to overwrite)."
+            )
+            continue
+        paths = export_nosology_docx_files(
+            slug,
+            root_dir,
+            allow_frozen_overwrite=args.allow_frozen_overwrite,
+        )
         print(f"[DOCX Exporter: {slug}] Generated 3 Word documents:")
         for k, p in paths.items():
             print(f"  - {k}: {p.relative_to(root_dir)} ({p.stat().st_size:,} bytes)")
